@@ -245,7 +245,11 @@ def audit_archive(args: argparse.Namespace, metadata: dict, report: dict) -> Non
                     config_source, config_bundle, config_files, config_path, complete_config = None,header_bundle,header_files,None,False
                 report["kconfig_source"] = config_source
                 report["kconfig"] = kconfig_values(config_bundle, config_files, config_path, complete_config)
-                report["kconfig_unknown"] = [k for k,v in report["kconfig"].items() if v is None or str(v).startswith("unknown")]
+                if report["kconfig"].get("CONFIG_MODULE_SIG") == "n":
+                    # Locked kernel/module/Kconfig makes MODULE_SIG_FORCE depend on MODULE_SIG.
+                    report["kconfig"]["CONFIG_MODULE_SIG_FORCE"] = "not applicable: CONFIG_MODULE_SIG=n"
+                report["kconfig_unknown"] = [k for k,v in report["kconfig"].items()
+                    if v is None or str(v).startswith("unknown")]
                 module_dep = find_suffix(module_files, "modules.dep")
                 if len(module_dep) != 1:
                     report["errors"].append("modules.dep missing or ambiguous")
