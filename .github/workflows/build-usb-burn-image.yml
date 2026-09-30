@@ -111,6 +111,9 @@ jobs:
             exit 1
           fi
           echo "$expected  $archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/kernel-archive"
+          cp "$archive" "$RUNNER_TEMP/kernel-archive/${version}.tar.gz"
+          archive="$RUNNER_TEMP/kernel-archive/${version}.tar.gz"
           echo "KERNEL_ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - name: Checkout the exact Ophub source containing W103D eMMC boot script
