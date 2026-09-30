@@ -8,7 +8,7 @@
 
 ## 1. 当前执行状态
 
-仓库：[Remix123/w103d-armbian-usb-burn](https://github.com/Remix123/w103d-armbian-usb-burn)。当前手册对应提交 `10699462c44893a005d80a9663e51522097c74bb`。2026-09-30 已得到这些真实结果：
+仓库：[Remix123/w103d-armbian-usb-burn](https://github.com/Remix123/w103d-armbian-usb-burn)。本次最终打包使用代码提交 `025700e81035f16d70d3479aa90b9b917a04bbb9`。2026-09-30 已得到这些真实结果：
 
 | 阶段 | GitHub run | 结果 |
 |---|---|---|
@@ -16,9 +16,9 @@
 | 内核构建 | [36669269184](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36669269184) | 内核已编译成功；最初仅因验证 step 缺 `rg` 退出失败 |
 | 已编译内核恢复校验 | [36680464101](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36680464101) | 成功；复核既有 artifact，没有重新编译 |
 | Trixie 系统重建 | [36683231196](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36683231196) | 成功；系统内核、DTB、modules 与锁定内核产物逐字节比对通过 |
-| USB Burning Tool 组装 | [36685785668](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36685785668) | 正在执行；还没有最终 IMG 或成品验证结论 |
+| USB Burning Tool 组装 | [36686786094](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36686786094) | 成功；GitHub 真实 mkimage parser 测试、Amlogic pack、独立回读及 artifact 下载 SHA 校验通过。产物为 artifact `11084660823`，1,717,797,104 bytes，SHA-256 `6464978a0ccac8f5f228429a2a2860fc20c1203f1dfbbeeb295d10b243e35aec` |
 
-只有最后一个工作流成功，并且 raw IMG artifact 重新下载后的大小和 SHA-256 一致，才能报告“GitHub 离线打包和验证通过”。最终设备烧录、冷启动、在线升级依然是独立的后续验收。
+本次最终工作流已成功，raw IMG artifact 重新下载后的大小和 SHA-256 一致，故可报告“GitHub 离线打包和验证通过”。设备烧录、冷启动、在线升级仍是独立的硬件验收，尚未执行。
 
 ## 2. 镜像类型、布局与两级启动链
 
@@ -77,10 +77,10 @@ unzip -Z1 W103D_Armbian_26.8.1_Server.zip
 shasum -a 256 W103D_Armbian_26.8.1_Server.img W103D_Armbian_26.8.1_Server.zip
 gh release view reference-input-2026-09-30 --repo Remix123/w103d-armbian-usb-burn
 gh release upload reference-input-2026-09-30 W103D_Armbian_26.8.1_Server.zip \
-  --repo Remix123/w103d-armbian-usb-burn --clobber
+  --repo Remix123/w103d-armbian-usb-burn
 ```
 
-检查 `unzip -Z1` 恰好只列出上述 IMG basename，两个 SHA-256 与 `config/reference.lock.json` 完全一致后才上传。若哈希变化，先更新并审查 lock 及布局，不得用 `--clobber` 以新文件静默替代固定输入。
+先确认 Release 资产尚不存在，检查 `unzip -Z1` 恰好只列出上述 IMG basename，并且两个 SHA-256 与 `config/reference.lock.json` 完全一致后才上传。ZIP 文件哈希还受归档元数据影响；即使 IMG 未变，重新压缩出的 ZIP 也可能与原 ZIP 字节不同。因此正常复现直接使用已上传且通过 lock 的 Release 资产；若 ZIP 哈希不一致，停止上传并保留原资产。确需更换输入时，先审查新的 IMG/ZIP hash、更新 lock 和布局报告，再以新版本化 Release/tag/asset 保存，避免覆盖已审查输入。
 
 如果重传参考包，先确认用户指定文件没有改变；重新计算两层 SHA-256、更新 lock、再上传 Release。不要使用压缩包多一层目录、同名旧资产或来自其他型号的近似文件。
 
