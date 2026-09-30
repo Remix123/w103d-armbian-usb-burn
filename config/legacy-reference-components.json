@@ -1,0 +1,17 @@
+{
+  "description": "Historical component digests from the previously reviewed W103D reference package. Reuse the old layout analysis only for exact byte-for-byte matches.",
+  "historical_reference_img_sha256": "07cc440dc2e480167bf4499e469507c7d0ebc9fdb628c30ff93e0ce38b4e8c9d",
+  "partition_sha256": {
+    "DDR.USB": "686bf51d624d29ac628b6ab681ec5b946e1dba71100ebbe3ef6e1c9755d69222",
+    "_aml_dtb.PARTITION": "cfba4e876887bddd7c01fe088f4e77f798a5b81ba935ed17de776803ecf8c4c9",
+    "boot.PARTITION": "c42fccec960b3bafa3443275368a4d6cfc982c1604e06e83c29a69188ea37d11",
+    "recovery.PARTITION": "c42fccec960b3bafa3443275368a4d6cfc982c1604e06e83c29a69188ea37d11",
+    "dtbo.PARTITION": "79dd4d50fb296ddcfb7f3416cc6384b531b0c9a8c47b76ef40e7d3731e197642",
+    "vbmeta.PARTITION": "d2e1979739ec67076a90b0fc625dae84a1aa2ed72d05d2b55d52539e3462b442",
+    "logo.PARTITION": "8363047ebca0d01063a2f041f312930eb6d8dfa7dec5d99c71d656aacb7d0b82",
+    "platform.conf": "1981261f893f6cf6c6c47ef5741b4d979ba926b126f238ca21e5ecd4c5467033"
+  },
+  "system_boot_files_sha256": {
+    "u-boot.ext": "ea6077ff2b79d830fd4baa3e567cb1acadfca7758dfd978a74e0ac0892adbddb"
+  }
+}

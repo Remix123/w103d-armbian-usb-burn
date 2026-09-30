@@ -4,3 +4,6 @@ outputs/
 *.img.gz
 *.zip
 !config/*.json
+
+__pycache__/
+*.py[cod]
