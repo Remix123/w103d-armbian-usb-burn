@@ -45,21 +45,27 @@ def ref(owner: str, repo: str, branch: str) -> str:
     return get_json(f"{API}/repos/{owner}/{repo}/commits/{branch}")["sha"]
 
 
+def enabled_w103d_row(model_database: str) -> list[str]:
+    rows = []
+    for line in model_database.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = [part.strip() for part in line.split(":")]
+        # model_database.conf documents 15 colon-delimited columns; indices
+        # below are zero-based (kernel tags=8, board=13, build=14).
+        if len(fields) >= 15 and fields[13] == "s905l3a-w103d" and fields[14].lower() == "yes":
+            rows.append(fields)
+    if len(rows) != 1:
+        raise SystemExit(f"expected exactly one enabled W103D model row, found {len(rows)}")
+    return rows[0]
+
+
 def main() -> int:
     ophub_repo = "ophub/amlogic-s9xxx-armbian"
     ophub_sha = ref("ophub", "amlogic-s9xxx-armbian", "main")
     model_url = f"https://raw.githubusercontent.com/{ophub_repo}/{ophub_sha}/build-armbian/armbian-files/common-files/etc/model_database.conf"
-    rows = []
-    for line in get_text(model_url).splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        fields = [x.strip() for x in line.split(":")]
-        if len(fields) >= 16 and fields[14] == "s905l3a-w103d" and fields[15].lower() == "yes":
-            rows.append(fields)
-    if len(rows) != 1:
-        raise SystemExit(f"expected exactly one enabled W103D model row, found {len(rows)}")
-    model = rows[0]
-    series_field = model[9]
+    model = enabled_w103d_row(get_text(model_url))
+    series_field = model[8]
     match = re.fullmatch(r"stable/(\d+\.\d+\.y)", series_field)
     if not match:
         raise SystemExit(f"unexpected W103D kernel series: {series_field}")
@@ -96,7 +102,7 @@ def main() -> int:
         "resolution_time_utc": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         "ophub": {"repository": ophub_repo, "commit": ophub_sha, "model_database_url": model_url,
                   "model": model[1], "soc": model[2], "linux_dtb": model[3],
-                  "kernel_tags": model[9], "board": model[14]},
+                  "kernel_tags": model[8], "board": model[13]},
         "kernel": {"repository": kernel_repo, "commit": kernel_sha, "branch": "main", "version": kernel_version,
                    "checkout_path": f"compile-kernel/kernel/linux-{kernel_series}-main",
                    "config_repository": "ophub/kernel", "config_commit": kernel_meta_sha,
