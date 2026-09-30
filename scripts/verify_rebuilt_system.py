@@ -130,13 +130,38 @@ def main() -> int:
         disk = temp / "system.img"
         with gzip.open(image, "rb") as source, disk.open("wb") as target:
             shutil.copyfileobj(source, target, length=4 * 1024 * 1024)
+        args.output_dir.mkdir(parents=True, exist_ok=True)
         loop = run("sudo", "losetup", "--find", "--show", "--partscan", str(disk))
         mounts: list[Path] = []
         try:
-            children = json.loads(run("lsblk", "--json", "--paths", "--output", "NAME,FSTYPE", loop))["blockdevices"][0].get("children", [])
-            partitions = [(child["name"], child.get("fstype", "")) for child in children if child.get("fstype")]
+            run("sudo", "udevadm", "settle", "--timeout=60")
+            with disk.open("rb") as stream:
+                mbr = stream.read(512)
+            if len(mbr) != 512 or mbr[510:512] != b"\x55\xaa":
+                raise SystemExit("rebuilt disk IMG does not contain an MBR signature")
+            partition_table = json.loads(run("sudo", "sfdisk", "--json", loop))
+            table = partition_table.get("partitiontable", {})
+            if table.get("label") != "dos" or not table.get("partitions"):
+                raise SystemExit(f"rebuilt image does not have the expected DOS/MBR partition table: {table}")
+            lsblk_data = json.loads(run("sudo", "lsblk", "--json", "--paths", "--output", "NAME,TYPE", loop))
+            children = lsblk_data["blockdevices"][0].get("children", [])
+            partitions = []
+            nodes = [p.get("node") for p in table["partitions"] if p.get("node")]
+            if not nodes:
+                nodes = [f"{loop}p{index}" for index in range(1, len(table["partitions"]) + 1)]
+            for node in nodes:
+                probe = run("sudo", "blkid", "-o", "export", node)
+                fields = dict(line.split("=", 1) for line in probe.splitlines() if "=" in line)
+                fs_type = fields.get("TYPE", "")
+                if fs_type:
+                    partitions.append((node, fs_type))
+            (args.output_dir / "partition-discovery.json").write_text(json.dumps({
+                "loop_device": loop, "mbr_signature": mbr[510:512].hex(),
+                "partition_table": table, "lsblk_children": children,
+                "recognized_filesystems": partitions,
+            }, indent=2) + "\n")
             if not partitions:
-                raise SystemExit("rebuilt disk image has no recognized filesystem partitions")
+                raise SystemExit(f"rebuilt image MBR partitions have no blkid-recognized filesystems: {children}")
             for index, (partition, filesystem) in enumerate(partitions):
                 mountpoint = temp / f"mnt-{index}"
                 mountpoint.mkdir()

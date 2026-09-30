@@ -119,7 +119,9 @@ jobs:
           BASE_FILENAME: ${{ steps.base.outputs.filename }}
         run: |
           set -euo pipefail
-          curl --fail --location --retry 3 "$BASE_URL" -o "$RUNNER_TEMP/$BASE_FILENAME"
+          curl --fail --location --retry 2 --retry-all-errors --connect-timeout 30 \
+            --max-time 2400 --speed-limit 1024 --speed-time 120 \
+            "$BASE_URL" -o "$RUNNER_TEMP/$BASE_FILENAME"
           echo "$BASE_SHA256  $RUNNER_TEMP/$BASE_FILENAME" | sha256sum --check
 
       - name: Install image rebuild and loop-mount inspection tools
@@ -186,9 +188,13 @@ jobs:
           cp "$RUNNER_TEMP/base-image.lock.json" diagnostics/ 2>/dev/null || true
           cp "$RUNNER_TEMP/kernel-input/sources.lock.json" diagnostics/sources-lock.json 2>/dev/null || true
           cp "$RUNNER_TEMP/kernel-input/kernel-input-manifest.json" diagnostics/ 2>/dev/null || true
+          cp outputs/system/partition-discovery.json diagnostics/ 2>/dev/null || true
           if [ -d upstream/ophub ]; then
             find upstream/ophub/build/output -type f \( -name '*.img' -o -name '*.img.gz' -o -name '*.img.xz' \) -printf '%p %s bytes\n' 2>/dev/null | sort > diagnostics/image-candidates.txt
             git -C upstream/ophub rev-parse HEAD > diagnostics/ophub-commit.txt 2>/dev/null || true
+            version=$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/kernel-input/kernel-input-manifest.json"))["kernel_version"])' 2>/dev/null)
+            mkdir -p candidate
+            find upstream/ophub/build/output -type f -name "Armbian_*_amlogic_s905l3a-w103d_trixie_${version}_*.img.gz" -exec cp '{}' candidate/ \; 2>/dev/null || true
           fi
 
       - name: Upload rebuild diagnostics
@@ -197,6 +203,15 @@ jobs:
         with:
           name: w103d-system-diagnostics-${{ github.run_id }}
           path: diagnostics/**
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload unverified system image candidate as raw input
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-system-candidate-${{ github.run_id }}
+          path: candidate/*.img.gz
           if-no-files-found: warn
           retention-days: 30
 
