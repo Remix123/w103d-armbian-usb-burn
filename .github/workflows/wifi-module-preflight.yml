@@ -1,0 +1,74 @@
+name: W103D Wi-Fi module build input preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Fetch and validate immutable run metadata
+        id: metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          recovery=$(python3 -c 'import json;print(json.load(open("config/wifi-module-preflight.lock.json"))["recovery_run"]["id"])')
+          source=$(python3 -c 'import json;print(json.load(open("config/wifi-module-preflight.lock.json"))["source_compile_run"]["id"])')
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$recovery" > "$RUNNER_TEMP/recovery-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$recovery/jobs?per_page=100" > "$RUNNER_TEMP/recovery-jobs.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$recovery/artifacts?per_page=100" > "$RUNNER_TEMP/recovery-artifacts.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$source" > "$RUNNER_TEMP/source-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$source/jobs?per_page=100" > "$RUNNER_TEMP/source-jobs.json"
+          python3 scripts/audit_wifi_module_build_inputs.py \
+            --phase metadata --lock config/wifi-module-preflight.lock.json \
+            --recovery-run "$RUNNER_TEMP/recovery-run.json" \
+            --recovery-jobs "$RUNNER_TEMP/recovery-jobs.json" \
+            --recovery-artifacts "$RUNNER_TEMP/recovery-artifacts.json" \
+            --source-run "$RUNNER_TEMP/source-run.json" \
+            --source-jobs "$RUNNER_TEMP/source-jobs.json" \
+            --out "$RUNNER_TEMP/wifi-module-preflight.json"
+
+      - name: Download the existing verified recovery artifact
+        if: steps.metadata.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          recovery=$(python3 -c 'import json;print(json.load(open("config/wifi-module-preflight.lock.json"))["recovery_run"]["id"])')
+          name=$(python3 -c 'import json;print(json.load(open("config/wifi-module-preflight.lock.json"))["recovery_run"]["artifact_name"])')
+          gh run download "$recovery" --repo "$GITHUB_REPOSITORY" --name "$name" --dir "$RUNNER_TEMP/kernel-recovery"
+
+      - name: Inspect prepared headers and bundled modules without compiling
+        if: steps.metadata.outcome == 'success'
+        run: |
+          set -euo pipefail
+          if ! command -v modinfo >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends kmod
+          fi
+          python3 scripts/audit_wifi_module_build_inputs.py \
+            --phase audit --lock config/wifi-module-preflight.lock.json \
+            --recovery-run "$RUNNER_TEMP/recovery-run.json" \
+            --recovery-jobs "$RUNNER_TEMP/recovery-jobs.json" \
+            --recovery-artifacts "$RUNNER_TEMP/recovery-artifacts.json" \
+            --source-run "$RUNNER_TEMP/source-run.json" \
+            --source-jobs "$RUNNER_TEMP/source-jobs.json" \
+            --artifact-dir "$RUNNER_TEMP/kernel-recovery" \
+            --out "$RUNNER_TEMP/wifi-module-preflight.json"
+
+      - name: Upload small JSON audit report only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-wifi-module-preflight-${{ github.run_id }}
+          path: ${{ runner.temp }}/wifi-module-preflight.json
+          if-no-files-found: warn
+          retention-days: 30

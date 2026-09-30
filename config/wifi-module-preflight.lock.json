@@ -1,0 +1,79 @@
+{
+  "kernel_input_manifest": {
+    "kernel_run_id": "36680464101",
+    "kernel_version": "6.18.54",
+    "kernel_release": "6.18.54-ophub",
+    "archive_artifact_path": "6.18.54.tar.gz",
+    "archive_sha256": "6e9e08040a9c2730bd3e9997f7536d146931fee308fce1d9d05b9f777347d609",
+    "sources_lock_sha256": "7f883cea3da44c4314a05937266885587f30af507f415e0715ef685f84829456",
+    "kernel_packages_manifest_sha256": "64fd8eaaab67d4c6f9c5df3a4f935adc49f78c03eae9d1d736cb1da858e96f2f",
+    "inner_sha256_members": {
+      "6.18.54/boot-6.18.54-ophub.tar.gz": "fdbb0d7fce330ea1c7eea58c426356a4c4015b22a3a22ff39a5852d3c7c2e47d",
+      "6.18.54/dtb-allwinner-6.18.54-ophub.tar.gz": "ec6a6b0e893b207e54a9761ca078a2153f9614dfd1dc6e8df92f26c5c5acba33",
+      "6.18.54/dtb-amlogic-6.18.54-ophub.tar.gz": "0127a0768016436895bbb0324cfe3bc0d73d4306a5e911e7b96df622f97e6829",
+      "6.18.54/dtb-rockchip-6.18.54-ophub.tar.gz": "1357654f00b727fa91b4cc9888e415b919fa20ea58120290d9f47319bf2c33d1",
+      "6.18.54/header-6.18.54-ophub.tar.gz": "66a9d04829c32806b4d7b1b8b4d782f9bbbbb4f6d2e2c515d393df8942c996cf",
+      "6.18.54/modules-6.18.54-ophub.tar.gz": "18dc0dfc871a621abac362807fd6c0a01f2e89dcc9a3af47ff1591bf94b0bdd6"
+    },
+    "ophub_source_lock": {
+      "resolution_time_utc": "2026-09-30T04:32:10.156153+00:00",
+      "ophub": {
+        "repository": "ophub/amlogic-s9xxx-armbian",
+        "commit": "8b601ee74525a5cc68661d372c613666b9fafddd",
+        "model_database_url": "https://raw.githubusercontent.com/ophub/amlogic-s9xxx-armbian/8b601ee74525a5cc68661d372c613666b9fafddd/build-armbian/armbian-files/common-files/etc/model_database.conf",
+        "model": "ZTE-W103D",
+        "soc": "s905l3a",
+        "linux_dtb": "meson-g12a-w103d.dtb",
+        "kernel_tags": "stable/6.18.y",
+        "board": "s905l3a-w103d"
+      },
+      "kernel": {
+        "repository": "ophub/linux-6.18.y",
+        "commit": "0f189d6b3197b94a8fbc96a670f0095cd63ce1a9",
+        "branch": "main",
+        "version": "6.18.54",
+        "checkout_path": "compile-kernel/kernel/linux-6.18.y-main",
+        "config_repository": "ophub/kernel",
+        "config_commit": "4dbcaf0f83d63bdf4efd343a3af922b2866408f2",
+        "config_path": "kernel-config/release/stable/config-6.18",
+        "config_sha256": "7e7547de8b8737980bf9352b8cc18b74e789d78a199658ee90d328434c401da6"
+      },
+      "kernel_toolchain": {
+        "repository": "ophub/kernel",
+        "release_tag": "dev",
+        "asset_name": "arm-gnu-toolchain-15.3.rel1-aarch64-aarch64-none-linux-gnu.tar.xz",
+        "size": 159671488,
+        "download_url": "https://github.com/ophub/kernel/releases/download/dev/arm-gnu-toolchain-15.3.rel1-aarch64-aarch64-none-linux-gnu.tar.xz",
+        "sha256": "8020be7aa1013704756158400cb5ba438d6f09b2909795d13617b9e7bac53286"
+      },
+      "container": {
+        "image": "ophub/armbian-resolute:arm64",
+        "digest": "sha256:bf3a0b931e7de1ca93a5d3d9a90b01e00cb1a70d42b4d1ed5747ad8956734d7e"
+      },
+      "limitations": [
+        "The kernel build uses exact Git commit IDs and the GitHub-reported SHA-256 for the GNU toolchain asset.",
+        "The compiler container is invoked with the exact registry digest, not the mutable arm64 tag."
+      ]
+    }
+  },
+  "recovery_run": {
+    "id": "36680464101",
+    "head_sha": "e2c1e644c22084bf2129cf993246608cd2c56878",
+    "workflow_path": ".github/workflows/recover-kernel-artifact.yml",
+    "job_name": "recover",
+    "artifact_name": "w103d-kernel-recovery-36680464101"
+  },
+  "source_compile_run": {
+    "id": "36669269184",
+    "head_sha": "ee0b11ca95d8f32b79c4bc0829c645ef286a6317",
+    "workflow_path": ".github/workflows/compile-kernel.yml",
+    "job_name": "compile",
+    "expected_run_conclusion": "failure",
+    "failure_signature": "rg: command not found",
+    "step_conclusions": {
+      "Compile kernel packages from the locked source": "success",
+      "Verify exact kernel packages and preserve build provenance": "failure",
+      "Upload kernel build results and diagnostics": "success"
+    }
+  }
+}
