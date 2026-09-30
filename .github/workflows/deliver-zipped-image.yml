@@ -101,6 +101,10 @@ jobs:
           with open(os.environ['GITHUB_ENV'],'a') as env:
               env.write(f"IMAGE_NAME={image_name}\nIMAGE_SHA256={match.group(1)}\nIMAGE_BYTES={int(size.group(1))}\nUSB_RUN_ID={os.environ['USB_RUN_ID']}\n")
           PY
+          IMAGE_NAME=$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/expected-image.json"))["name"])')
+          IMAGE_SHA256=$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/expected-image.json"))["sha256"])')
+          IMAGE_BYTES=$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/expected-image.json"))["bytes"])')
+          export IMAGE_NAME IMAGE_SHA256 IMAGE_BYTES
           image_artifact_id=$(cat "$RUNNER_TEMP/usb-image-artifact-id")
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$image_artifact_id/zip" > "$RUNNER_TEMP/raw-image-artifact-transfer.bin"
           python3 scripts/deliver_image_zip.py extract-raw-artifact \
