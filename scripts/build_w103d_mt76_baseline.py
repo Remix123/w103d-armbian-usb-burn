@@ -128,6 +128,7 @@ def main() -> int:
                 raise RuntimeError("diagnostic patch file is missing")
             allowed = {
                 "drivers/net/wireless/mediatek/mt76/mt7615/mac.c",
+                "drivers/net/wireless/mediatek/mt76/mt7615/main.c",
                 "drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c",
                 "drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_txrx.c",
             }
