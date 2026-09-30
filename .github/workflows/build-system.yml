@@ -1,0 +1,174 @@
+name: Rebuild W103D Trixie system with pinned Ophub kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_run_id:
+        description: "Successful compile-kernel.yml Actions run ID"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: w103d-kernel-stable-and-system-rebuild
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Download and validate the selected kernel build artifact
+        id: kernel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KERNEL_RUN_ID: ${{ inputs.kernel_run_id }}
+        run: |
+          set -euo pipefail
+          run_id="$KERNEL_RUN_ID"
+          [[ "$run_id" =~ ^[0-9]+$ ]]
+          gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status,conclusion,workflowName,headSha > "$RUNNER_TEMP/kernel-run.json"
+          python3 - <<'PY'
+          import json, os
+          run = json.load(open(os.environ['RUNNER_TEMP'] + '/kernel-run.json'))
+          if run['status'] != 'completed' or run['conclusion'] != 'success' or run['workflowName'] != 'Compile pinned Ophub W103D kernel':
+              raise SystemExit(f"kernel run is not a successful completed compile: {run}")
+          PY
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "w103d-kernel-build-$run_id" --dir "$RUNNER_TEMP/kernel-artifact"
+          python3 scripts/prepare_kernel_input.py \
+            --artifact-dir "$RUNNER_TEMP/kernel-artifact" \
+            --output-dir "$RUNNER_TEMP/kernel-input" \
+            --run-id "$run_id"
+          cat "$RUNNER_TEMP/kernel-input/kernel-input-manifest.json"
+          version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel_version"])' "$RUNNER_TEMP/kernel-input/kernel-input-manifest.json")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish exact kernel archive for Ophub rebuild consumption
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.kernel.outputs.version }}
+          KERNEL_RUN_ID: ${{ inputs.kernel_run_id }}
+        run: |
+          set -euo pipefail
+          gh release view kernel_stable --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create kernel_stable --repo "$GITHUB_REPOSITORY" --title "W103D Ophub kernel feed" --notes "Validated kernel archives built from the source lock attached to each system build."
+          mkdir -p "$RUNNER_TEMP/release-assets"
+          cp "$RUNNER_TEMP/kernel-input/${VERSION}.tar.gz" "$RUNNER_TEMP/release-assets/${VERSION}.tar.gz"
+          cp "$RUNNER_TEMP/kernel-input/sources.lock.json" "$RUNNER_TEMP/release-assets/sources.lock-${KERNEL_RUN_ID}.json"
+          cp "$RUNNER_TEMP/kernel-input/kernel-input-manifest.json" "$RUNNER_TEMP/release-assets/kernel-input-manifest-${KERNEL_RUN_ID}.json"
+          gh release upload kernel_stable \
+            "$RUNNER_TEMP/release-assets/${VERSION}.tar.gz" \
+            "$RUNNER_TEMP/release-assets/sources.lock-${KERNEL_RUN_ID}.json" \
+            "$RUNNER_TEMP/release-assets/kernel-input-manifest-${KERNEL_RUN_ID}.json" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          mkdir -p "$RUNNER_TEMP/release-check"
+          gh release download kernel_stable --repo "$GITHUB_REPOSITORY" --pattern "${VERSION}.tar.gz" --dir "$RUNNER_TEMP/release-check"
+          echo "$(sha256sum "$RUNNER_TEMP/kernel-input/${VERSION}.tar.gz" | cut -d' ' -f1)  $RUNNER_TEMP/release-check/${VERSION}.tar.gz" | sha256sum --check
+
+      - name: Resolve latest official Trixie base image and checksum
+        id: base
+        env:
+          BASE_IMAGE_LOCK_OUT: ${{ runner.temp }}/base-image.lock.json
+        run: python3 scripts/resolve_base_image.py
+
+      - name: Download and verify the official generic Trixie base image
+        env:
+          BASE_URL: ${{ steps.base.outputs.url }}
+          BASE_SHA256: ${{ steps.base.outputs.sha256 }}
+          BASE_FILENAME: ${{ steps.base.outputs.filename }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 "$BASE_URL" -o "$RUNNER_TEMP/$BASE_FILENAME"
+          echo "$BASE_SHA256  $RUNNER_TEMP/$BASE_FILENAME" | sha256sum --check
+
+      - name: Install image rebuild and loop-mount inspection tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes \
+            bc bsdutils bzip2 ca-certificates cpio curl device-tree-compiler dosfstools e2fsprogs \
+            fdisk file gdisk git gzip jq kmod kpartx libarchive-tools lvm2 lz4 mtools parted pv \
+            qemu-user-static qemu-utils rsync tar u-boot-tools unzip util-linux wget xz-utils zstd
+
+      - name: Checkout locked Ophub rebuild action
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ophub/amlogic-s9xxx-armbian
+          path: upstream/ophub
+
+      - name: Resolve and checkout the Ophub source commit in the kernel lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ophub_sha=$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/kernel-input/sources.lock.json"))["ophub"]["commit"])')
+          git -C upstream/ophub fetch --depth=1 origin "$ophub_sha"
+          git -C upstream/ophub checkout --detach "$ophub_sha"
+          test "$(git -C upstream/ophub rev-parse HEAD)" = "$ophub_sha"
+          echo "OPHUB_SHA=$ophub_sha" >> "$GITHUB_ENV"
+
+      - name: Rebuild the generic Trixie image for W103D with the exact kernel archive
+        uses: ./upstream/ophub
+        with:
+          build_target: armbian
+          armbian_path: ${{ runner.temp }}/${{ steps.base.outputs.filename }}
+          armbian_board: s905l3a-w103d
+          armbian_kernel: ${{ steps.kernel.outputs.version }}
+          auto_kernel: "false"
+          kernel_repo: ${{ github.repository }}
+          kernel_usage: stable
+          armbian_fstype: ext4
+          builder_name: W103D-GitHub-Actions
+
+      - name: Require one named W103D image and compare installed kernel files
+        env:
+          KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_rebuilt_system.py \
+            --images-dir upstream/ophub/build/output/images \
+            --kernel-archive "$RUNNER_TEMP/kernel-input/${KERNEL_VERSION}.tar.gz" \
+            --kernel-manifest "$RUNNER_TEMP/kernel-input/kernel-packages.json" \
+            --kernel-version "$KERNEL_VERSION" \
+            --dtb-name meson-g12a-w103d.dtb \
+            --output-dir outputs/system
+          cp "$RUNNER_TEMP/base-image.lock.json" outputs/system/
+          cp "$RUNNER_TEMP/kernel-input/sources.lock.json" outputs/system/
+          cp "$RUNNER_TEMP/kernel-input/kernel-input-manifest.json" outputs/system/
+          printf '%s\n' "$OPHUB_SHA" > outputs/system/ophub-commit.txt
+
+      - name: Capture build diagnostics
+        if: always()
+        run: |
+          set +e
+          mkdir -p diagnostics
+          cp "$RUNNER_TEMP/base-image.lock.json" diagnostics/ 2>/dev/null || true
+          cp "$RUNNER_TEMP/kernel-input/sources.lock.json" diagnostics/sources-lock.json 2>/dev/null || true
+          cp "$RUNNER_TEMP/kernel-input/kernel-input-manifest.json" diagnostics/ 2>/dev/null || true
+          if [ -d upstream/ophub ]; then
+            find upstream/ophub/build/output -type f \( -name '*.img' -o -name '*.img.gz' -o -name '*.img.xz' \) -printf '%p %s bytes\n' 2>/dev/null | sort > diagnostics/image-candidates.txt
+            git -C upstream/ophub rev-parse HEAD > diagnostics/ophub-commit.txt 2>/dev/null || true
+          fi
+
+      - name: Upload rebuild diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-system-diagnostics-${{ github.run_id }}
+          path: diagnostics/**
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload verified W103D system disk input
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-rebuilt-system-${{ github.run_id }}
+          path: outputs/system/**
+          if-no-files-found: error
+          retention-days: 30

@@ -152,7 +152,7 @@ jobs:
             test -d upstream/ophub/compile-kernel/output && find upstream/ophub/compile-kernel/output -maxdepth 3 -type f -printf '%p %s bytes\n' | sort
             test -d upstream/ophub/compile-kernel/output && find upstream/ophub/compile-kernel/output -maxdepth 3 -type d -printf '%p/\n' | sort
           } > diagnostics/build-state.txt 2>&1
-          cp "$RUNNER_TEMP/sources.lock.json" diagnostics/ 2>/dev/null || true
+          cp "$RUNNER_TEMP/sources.lock.json" diagnostics/sources-lock-fallback.json 2>/dev/null || true
           cp outputs-toolchain-version.txt diagnostics/ 2>/dev/null || true
           docker ps -a > diagnostics/docker-ps.txt 2>&1 || true
           docker logs armbian-ophub > diagnostics/container.log 2>&1 || true
