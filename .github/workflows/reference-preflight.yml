@@ -27,6 +27,10 @@ jobs:
             --lock config/reference.lock.json \
             --output-dir "$RUNNER_TEMP/reference/unpacked" \
             | tee "$RUNNER_TEMP/reference-validation.json"
+      - name: Install read-only image inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes mtools e2fsprogs
       - name: Pin and inspect Linux packer
         run: |
           set -euo pipefail
@@ -39,11 +43,25 @@ jobs:
           chmod +x "$RUNNER_TEMP/aml_image_v2_packer"
           "$RUNNER_TEMP/aml_image_v2_packer" -c "$RUNNER_TEMP/reference/unpacked/W103D_Armbian_26.8.1_Server.img" | tee "$RUNNER_TEMP/reference-container-check.log"
           grep -q 'Image check OK' "$RUNNER_TEMP/reference-container-check.log"
+          mkdir -p "$RUNNER_TEMP/reference/components"
+          "$RUNNER_TEMP/aml_image_v2_packer" -d \
+            "$RUNNER_TEMP/reference/unpacked/W103D_Armbian_26.8.1_Server.img" \
+            "$RUNNER_TEMP/reference/components" \
+            > "$RUNNER_TEMP/reference-unpack.log" 2>&1
+      - name: Inspect extracted components and W103D boot chain
+        run: |
+          python3 scripts/inspect_reference.py \
+            --unpacked "$RUNNER_TEMP/reference/components" \
+            --out "$RUNNER_TEMP/reference-layout.json" \
+            | tee "$RUNNER_TEMP/reference-inspection-summary.json"
       - name: Upload preflight evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a 
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: reference-preflight
+          name: reference-preflight-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/reference-container-check.log
             ${{ runner.temp }}/reference-validation.json
-          retention-days: 7
+            ${{ runner.temp }}/reference-unpack.log
+            ${{ runner.temp }}/reference-layout.json
+            ${{ runner.temp }}/reference-inspection-summary.json
+          retention-days: 30
