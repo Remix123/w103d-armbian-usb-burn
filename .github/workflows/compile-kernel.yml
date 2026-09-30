@@ -69,7 +69,7 @@ jobs:
         with:
           repository: ophub/linux-${{ needs.resolve.outputs.kernel_series }}
           ref: ${{ needs.resolve.outputs.kernel_sha }}
-          path: upstream/ophub/compile-kernel/kernel/linux-${{ needs.resolve.outputs.kernel_series }}-${{ needs.resolve.outputs.kernel_sha }}
+          path: upstream/ophub/compile-kernel/kernel/linux-${{ needs.resolve.outputs.kernel_series }}-main
       - name: Checkout the exact Ophub kernel config repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -88,7 +88,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C upstream/ophub rev-parse HEAD)" = "$OPHUB_SHA"
-          src="upstream/ophub/compile-kernel/kernel/linux-${KERNEL_SERIES}-${KERNEL_SHA}"
+          src="upstream/ophub/compile-kernel/kernel/linux-${KERNEL_SERIES}-main"
           test "$(git -C "$src" rev-parse HEAD)" = "$KERNEL_SHA"
           test "$(git -C upstream/kernel-meta rev-parse HEAD)" = "$KERNEL_META_SHA"
           version=$(sed -nE 's/^VERSION = ([0-9]+)$/\1/p' "$src/Makefile" | head -n1)
@@ -126,7 +126,7 @@ jobs:
           sudo apt-get install --yes docker.io
           cd upstream/ophub
           sudo bash ./recompile \
-            -r "ophub/linux-${{ needs.resolve.outputs.kernel_series }}@${{ needs.resolve.outputs.kernel_sha }}" \
+            -r "ophub/linux-${{ needs.resolve.outputs.kernel_series }}" \
             -k "$KERNEL_VERSION" \
             -a false \
             -m all \
@@ -134,20 +134,24 @@ jobs:
             -z xz \
             -d false \
             -i "ophub/armbian-resolute@$CONTAINER_DIGEST"
-          src="compile-kernel/kernel/linux-${{ needs.resolve.outputs.kernel_series }}-${{ needs.resolve.outputs.kernel_sha }}"
+          src="compile-kernel/kernel/linux-${{ needs.resolve.outputs.kernel_series }}-main"
           test "$(git -C "$src" rev-parse HEAD)" = "${{ needs.resolve.outputs.kernel_sha }}"
       - name: Verify exact kernel packages and preserve build provenance
         env:
           KERNEL_VERSION: ${{ needs.resolve.outputs.kernel_version }}
         run: |
           set -euo pipefail
-          archive="upstream/ophub/compile-kernel/output/deb-${KERNEL_VERSION}-ophub.tar.gz"
+          archive="upstream/ophub/compile-kernel/output/deb-${KERNEL_VERSION}.tar.gz"
           test -s "$archive"
           mkdir -p "$RUNNER_TEMP/extracted-debs"
           tar -xzf "$archive" -C "$RUNNER_TEMP/extracted-debs"
           mkdir -p outputs/kernel-debs
           find "$RUNNER_TEMP/extracted-debs" -type f -name '*.deb' -exec cp -v {} outputs/kernel-debs/ \;
           test "$(find outputs/kernel-debs -type f -name '*.deb' | wc -l)" -gt 0
+          runtime_archive="upstream/ophub/compile-kernel/output/${KERNEL_VERSION}.tar.gz"
+          test -s "$runtime_archive"
+          tar -tzf "$runtime_archive" > "$RUNNER_TEMP/kernel-runtime-archive.list"
+          rg -q "^${KERNEL_VERSION}/(boot-|modules-|header-|dtb-amlogic-)" "$RUNNER_TEMP/kernel-runtime-archive.list"
           python3 scripts/create_kernel_manifest.py \
             --deb-dir outputs/kernel-debs \
             --version "$KERNEL_VERSION" \
@@ -163,4 +167,5 @@ jobs:
             outputs/kernel-packages.json
             outputs/sources.lock.json
             outputs/toolchain-version.txt
+            upstream/ophub/compile-kernel/output/*.tar.gz
           retention-days: 30
