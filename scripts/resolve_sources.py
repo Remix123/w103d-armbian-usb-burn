@@ -98,7 +98,7 @@ def main() -> int:
                   "model": model[1], "soc": model[2], "linux_dtb": model[3],
                   "kernel_tags": model[9], "board": model[14]},
         "kernel": {"repository": kernel_repo, "commit": kernel_sha, "branch": "main", "version": kernel_version,
-                   "checkout_path": f"compile-kernel/kernel/linux-{kernel_series}-<locked-sha>",
+                   "checkout_path": f"compile-kernel/kernel/linux-{kernel_series}-{kernel_sha}",
                    "config_repository": "ophub/kernel", "config_commit": kernel_meta_sha,
                    "config_path": config_path, "config_sha256": config_sha},
         "kernel_toolchain": {"repository": "ophub/kernel", "release_tag": toolchain_release["tag_name"],
