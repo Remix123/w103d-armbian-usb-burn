@@ -1,0 +1,56 @@
+name: Build and deliver W103D USB image
+run-name: W103D one-click build (${{ github.run_id }}-${{ github.run_attempt }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      reuse_system_run_id:
+        description: "Optional successful build-system run to resume from; leave blank for the complete source build"
+        required: false
+        type: string
+        default: ""
+      reuse_usb_run_id:
+        description: "Optional successful USB image run to resume at ZIP delivery; leave blank otherwise"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: w103d-full-source-pipeline
+  cancel-in-progress: false
+
+jobs:
+  build-deliver:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Run the complete source build and delivery pipeline
+        id: pipeline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REUSE_SYSTEM_RUN_ID: ${{ inputs.reuse_system_run_id }}
+          REUSE_USB_RUN_ID: ${{ inputs.reuse_usb_run_id }}
+        run: python3 scripts/orchestrate_build.py
+      - name: Cancel only this pipeline's unfinished child runs on failure or cancellation
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/cleanup_pipeline.py
+      - name: Export the credential-free pipeline provenance report
+        if: ${{ always() }}
+        run: python3 scripts/export_pipeline_state.py
+      - name: Upload pipeline provenance and final result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-pipeline-result-${{ github.run_id }}
+          path: outputs/pipeline-result.json
+          if-no-files-found: error
+          retention-days: 90
