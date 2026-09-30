@@ -1,4 +1,5 @@
 name: Rebuild W103D Trixie system with pinned Ophub kernel
+run-name: Rebuild W103D Trixie system (${{ inputs.pipeline_id || 'manual' }})
 
 on:
   workflow_dispatch:
@@ -7,6 +8,11 @@ on:
         description: "Successful compile-kernel run or successful recovery run containing the verified kernel artifact"
         required: true
         type: string
+      pipeline_id:
+        description: "Orchestrator correlation token (leave blank for manual runs)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write

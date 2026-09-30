@@ -1,0 +1,194 @@
+name: Deliver validated W103D USB image as ZIP
+run-name: ZIP verified W103D image (${{ inputs.pipeline_id || 'manual' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      usb_run_id:
+        description: "Successful build-usb-burn-image workflow run containing the raw IMG and verification reports"
+        required: true
+        type: string
+      pipeline_id:
+        description: "Orchestrator correlation token (leave blank for manual runs)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: w103d-zipped-image-delivery
+  cancel-in-progress: false
+
+jobs:
+  package-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Verify USB run and download its exact image and reports
+        env:
+          GH_TOKEN: ${{ github.token }}
+          USB_RUN_ID: ${{ inputs.usb_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$USB_RUN_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$USB_RUN_ID" > "$RUNNER_TEMP/usb-run.json"
+          python3 - <<'PY'
+          import json, os
+          run=json.load(open(os.environ['RUNNER_TEMP']+'/usb-run.json'))
+          if run.get('status')!='completed' or run.get('conclusion')!='success':
+              raise SystemExit(f"USB build run has not succeeded: {run.get('status')} {run.get('conclusion')}")
+          if run.get('path')!='.github/workflows/build-usb-burn-image.yml' or run.get('name')!='Assemble and validate W103D USB Burning Tool image':
+              raise SystemExit(f"USB input came from an unapproved workflow path/name: {run.get('path')} {run.get('name')}")
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$USB_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/usb-artifacts.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          run_id=os.environ['USB_RUN_ID']
+          artifacts=json.load(open(os.environ['RUNNER_TEMP']+'/usb-artifacts.json'))['artifacts']
+          reports=f'w103d-usb-burning-tool-verification-{run_id}'
+          image=[a for a in artifacts if a.get('name','').endswith('_USB_Burning_Tool.img')]
+          report=[a for a in artifacts if a.get('name')==reports]
+          if len(image)!=1 or len(report)!=1 or image[0].get('expired') or report[0].get('expired'):
+              raise SystemExit(f"expected one unexpired raw IMG and one verification artifact: {artifacts}")
+          Path(os.environ['RUNNER_TEMP']+'/usb-image-name').write_text(image[0]['name'])
+          Path(os.environ['RUNNER_TEMP']+'/usb-image-artifact-id').write_text(str(image[0]['id']))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+              out.write(f"image_name={image[0]['name']}\nimage_artifact_id={image[0]['id']}\n")
+          PY
+          image_name=$(cat "$RUNNER_TEMP/usb-image-name")
+          gh run download "$USB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$image_name" --dir "$RUNNER_TEMP/usb-image"
+          gh run download "$USB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "w103d-usb-burning-tool-verification-$USB_RUN_ID" --dir "$RUNNER_TEMP/usb-reports"
+          mkdir -p outputs/input/reports
+          image=$(find "$RUNNER_TEMP/usb-image" -maxdepth 2 -type f -name '*.img' -print -quit)
+          test -n "$image"
+          cp "$image" "outputs/input/$image_name"
+          cp -R "$RUNNER_TEMP/usb-reports/." outputs/input/reports/
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          root=Path('outputs/input')
+          image=next(root.glob('*.img'))
+          report=json.loads((root/'reports/verification-report.json').read_text())
+          validation=(root/'reports/artifact-download-validation.txt').read_text()
+          metadata=json.loads((root/'reports/uploaded-artifact-metadata.json').read_text())
+          artifact_id=int(Path(os.environ['RUNNER_TEMP']+'/usb-image-artifact-id').read_text())
+          if report.get('final_image')!=image.name or report.get('hardware_flashed') is not False or report.get('hardware_boot_tested') is not False:
+              raise SystemExit('USB report does not describe the expected offline-only IMG')
+          if metadata.get('id')!=artifact_id or metadata.get('name')!=image.name or metadata.get('expired'):
+              raise SystemExit('source artifact metadata differs from the selected raw IMG')
+          match=re.search(r'^sha256=([0-9a-f]{64})$',validation,re.M)
+          size=re.search(r'^bytes=([0-9]+)$',validation,re.M)
+          if not match or not size or int(size.group(1))!=image.stat().st_size:
+              raise SystemExit('source artifact-download-validation report is incomplete or has wrong size')
+          import hashlib
+          digest=hashlib.sha256()
+          with image.open('rb') as stream:
+              for block in iter(lambda:stream.read(1024*1024),b''): digest.update(block)
+          if digest.hexdigest()!=match.group(1) or report.get('sha256')!=match.group(1) or report.get('bytes')!=image.stat().st_size:
+              raise SystemExit('downloaded raw IMG differs from its successful USB verification report')
+          provenance=root/'reports/provenance'
+          required={'sources.lock.json','kernel-input-manifest.json','base-image.lock.json','system-image-verification.json','system-source-run.json'}
+          missing=required-{p.name for p in provenance.iterdir() if p.is_file()}
+          if missing or not (root/'reports/reference.lock.json').is_file():
+              raise SystemExit(f'missing source provenance files: {sorted(missing)}')
+          print(f"verified {image.name}: {image.stat().st_size} bytes sha256={match.group(1)} artifact_id={artifact_id}")
+          with open(os.environ['GITHUB_ENV'],'a') as env:
+              env.write(f"IMAGE_NAME={image.name}\nIMAGE_SHA256={match.group(1)}\nUSB_RUN_ID={os.environ['USB_RUN_ID']}\n")
+          PY
+
+      - name: Create a ZIP containing the raw IMG, checksum manifest, and reports
+        id: package
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path('outputs/input/reports/delivery-source.json').write_text(json.dumps({
+              'usb_workflow_run_id':os.environ['USB_RUN_ID'],
+              'raw_image_basename':os.environ['IMAGE_NAME'],
+              'raw_image_sha256':os.environ['IMAGE_SHA256'],
+              'hardware_flashed':False,
+              'hardware_boot_tested':False
+          },indent=2)+'\n')
+          PY
+          zip_name="${IMAGE_NAME%.img}.zip"
+          python3 scripts/deliver_image_zip.py package \
+            --image "outputs/input/$IMAGE_NAME" \
+            --reports outputs/input/reports \
+            --out outputs/delivery \
+            --zip-name "$zip_name" | tee outputs/delivery/zip-verification.json
+          printf '%s\n' "$zip_name" > outputs/delivery/zip-basename.txt
+          echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
+          echo "zip_basename=$zip_name" >> "$GITHUB_OUTPUT"
+          sha256sum "outputs/delivery/$zip_name" > "outputs/delivery/$zip_name.sha256"
+          cp "outputs/delivery/$zip_name.sha256" outputs/delivery/zip-external.sha256
+          cat outputs/delivery/zip-verification.json
+
+      - name: Upload one raw ZIP artifact and an external ZIP SHA-256 sidecar
+        id: upload-zip
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.package.outputs.zip_basename }}
+          path: outputs/delivery/${{ steps.package.outputs.zip_basename }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload external ZIP checksum
+        id: upload-sidecar
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.package.outputs.zip_basename }}.sha256
+          path: outputs/delivery/${{ steps.package.outputs.zip_basename }}.sha256
+          archive: false
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Re-download the uploaded ZIP by artifact ID and verify bytes and members
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIP_ARTIFACT_ID: ${{ steps.upload-zip.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          test -n "$ZIP_ARTIFACT_ID"
+          zip_name="$ZIP_NAME"
+          expected_zip_sha=$(cut -d' ' -f1 "outputs/delivery/$zip_name.sha256")
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ZIP_ARTIFACT_ID" > outputs/delivery/uploaded-zip-artifact-metadata.json
+          python3 - <<'PY'
+          import json, os
+          m=json.load(open('outputs/delivery/uploaded-zip-artifact-metadata.json'))
+          if m.get('id')!=int(os.environ['ZIP_ARTIFACT_ID']) or m.get('name')!=os.environ['IMAGE_NAME']+'.zip' or m.get('expired'):
+              raise SystemExit(f"uploaded ZIP artifact metadata mismatch: {m}")
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ZIP_ARTIFACT_ID/zip" > "$RUNNER_TEMP/zip-artifact-transfer.bin"
+          python3 scripts/deliver_image_zip.py verify-artifact-download \
+            --transfer "$RUNNER_TEMP/zip-artifact-transfer.bin" \
+            --out outputs/delivery/readback \
+            --expected-name "$zip_name" \
+            --expected-zip-sha256 "$expected_zip_sha" \
+            --expected-image "$IMAGE_NAME" \
+            --expected-image-sha256 "$IMAGE_SHA256" | tee outputs/delivery/zip-artifact-readback.json
+          printf 'zip_artifact_id=%s\nzip_basename=%s\nzip_bytes=%s\nzip_sha256=%s\nsource_usb_run_id=%s\nimage_basename=%s\nimage_sha256=%s\n' \
+            "$ZIP_ARTIFACT_ID" "$zip_name" "$(stat -c '%s' "outputs/delivery/$zip_name")" "$expected_zip_sha" \
+            "$USB_RUN_ID" "$IMAGE_NAME" "$IMAGE_SHA256" > outputs/delivery/zip-delivery-validation.txt
+
+      - name: Upload ZIP delivery verification report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-zipped-delivery-verification-${{ github.run_id }}
+          path: |
+            outputs/delivery/zip-verification.json
+            outputs/delivery/zip-basename.txt
+            outputs/delivery/zip-external.sha256
+            outputs/delivery/zip-artifact-readback.json
+            outputs/delivery/zip-delivery-validation.txt
+            outputs/delivery/uploaded-zip-artifact-metadata.json
+          if-no-files-found: warn
+          retention-days: 90

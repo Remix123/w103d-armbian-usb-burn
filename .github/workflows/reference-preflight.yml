@@ -1,7 +1,14 @@
 name: Reference image preflight
+run-name: Reference image preflight (${{ inputs.pipeline_id || 'manual' }})
 
 on:
   workflow_dispatch:
+    inputs:
+      pipeline_id:
+        description: "Orchestrator correlation token (leave blank for manual runs)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read

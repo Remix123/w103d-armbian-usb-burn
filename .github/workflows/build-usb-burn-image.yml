@@ -1,4 +1,5 @@
 name: Assemble and validate W103D USB Burning Tool image
+run-name: Assemble W103D USB image (${{ inputs.pipeline_id || 'manual' }})
 
 on:
   workflow_dispatch:
@@ -7,6 +8,11 @@ on:
         description: "Successful build-system run containing the Trixie W103D image and verification report"
         required: true
         type: string
+      pipeline_id:
+        description: "Orchestrator correlation token (leave blank for manual runs)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
