@@ -248,6 +248,13 @@ def audit_archive(args: argparse.Namespace, metadata: dict, report: dict) -> Non
                 if report["kconfig"].get("CONFIG_MODULE_SIG") == "n":
                     # Locked kernel/module/Kconfig makes MODULE_SIG_FORCE depend on MODULE_SIG.
                     report["kconfig"]["CONFIG_MODULE_SIG_FORCE"] = "not applicable: CONFIG_MODULE_SIG=n"
+                report["kconfig_applicability"] = {
+                    "CONFIG_MODULE_SIG_FORCE": {
+                        "depends_on": "CONFIG_MODULE_SIG",
+                        "source_url": "https://raw.githubusercontent.com/ophub/linux-6.18.y/0f189d6b3197b94a8fbc96a670f0095cd63ce1a9/kernel/module/Kconfig",
+                        "interpretation": "not applicable when CONFIG_MODULE_SIG=n; otherwise an absent value remains unknown",
+                    }
+                }
                 report["kconfig_unknown"] = [k for k,v in report["kconfig"].items()
                     if v is None or str(v).startswith("unknown")]
                 module_dep = find_suffix(module_files, "modules.dep")
