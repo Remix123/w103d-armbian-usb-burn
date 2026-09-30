@@ -1,0 +1,166 @@
+name: Compile pinned Ophub W103D kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_kernel_build:
+        description: "Run the long arm64 kernel compilation after source-lock review"
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resolve:
+    if: ${{ inputs.run_kernel_build }}
+    runs-on: ubuntu-24.04
+    outputs:
+      ophub_sha: ${{ steps.lock.outputs.ophub_sha }}
+      kernel_sha: ${{ steps.lock.outputs.kernel_sha }}
+      kernel_meta_sha: ${{ steps.lock.outputs.kernel_meta_sha }}
+      kernel_series: ${{ steps.lock.outputs.kernel_series }}
+      kernel_version: ${{ steps.lock.outputs.kernel_version }}
+      kernel_config: ${{ steps.lock.outputs.kernel_config }}
+      kernel_config_sha256: ${{ steps.lock.outputs.kernel_config_sha256 }}
+      container_digest: ${{ steps.lock.outputs.container_digest }}
+      toolchain_asset: ${{ steps.lock.outputs.toolchain_asset }}
+      toolchain_url: ${{ steps.lock.outputs.toolchain_url }}
+      toolchain_sha256: ${{ steps.lock.outputs.toolchain_sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Resolve latest supported W103D kernel sources, then freeze commit IDs
+        id: lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_LOCK_OUT: ${{ runner.temp }}/sources.lock.json
+        run: python3 scripts/resolve_sources.py
+      - name: Preserve source lock
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: sources-lock-${{ github.run_id }}
+          path: ${{ runner.temp }}/sources.lock.json
+          retention-days: 30
+
+  compile:
+    needs: resolve
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Download the immutable source lock from the resolver job
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: sources-lock-${{ github.run_id }}
+          path: ${{ runner.temp }}
+      - name: Checkout the exact Ophub build scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ophub/amlogic-s9xxx-armbian
+          ref: ${{ needs.resolve.outputs.ophub_sha }}
+          path: upstream/ophub
+      - name: Checkout the exact Ophub Linux kernel source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ophub/linux-${{ needs.resolve.outputs.kernel_series }}
+          ref: ${{ needs.resolve.outputs.kernel_sha }}
+          path: upstream/ophub/compile-kernel/kernel/linux-${{ needs.resolve.outputs.kernel_series }}-${{ needs.resolve.outputs.kernel_sha }}
+      - name: Checkout the exact Ophub kernel config repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ophub/kernel
+          ref: ${{ needs.resolve.outputs.kernel_meta_sha }}
+          path: upstream/kernel-meta
+      - name: Validate pinned checkouts and install the pinned kernel config
+        env:
+          OPHUB_SHA: ${{ needs.resolve.outputs.ophub_sha }}
+          KERNEL_SHA: ${{ needs.resolve.outputs.kernel_sha }}
+          KERNEL_META_SHA: ${{ needs.resolve.outputs.kernel_meta_sha }}
+          KERNEL_SERIES: ${{ needs.resolve.outputs.kernel_series }}
+          KERNEL_VERSION: ${{ needs.resolve.outputs.kernel_version }}
+          KERNEL_CONFIG: ${{ needs.resolve.outputs.kernel_config }}
+          KERNEL_CONFIG_SHA256: ${{ needs.resolve.outputs.kernel_config_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$(git -C upstream/ophub rev-parse HEAD)" = "$OPHUB_SHA"
+          src="upstream/ophub/compile-kernel/kernel/linux-${KERNEL_SERIES}-${KERNEL_SHA}"
+          test "$(git -C "$src" rev-parse HEAD)" = "$KERNEL_SHA"
+          test "$(git -C upstream/kernel-meta rev-parse HEAD)" = "$KERNEL_META_SHA"
+          version=$(sed -nE 's/^VERSION = ([0-9]+)$/\1/p' "$src/Makefile" | head -n1)
+          patchlevel=$(sed -nE 's/^PATCHLEVEL = ([0-9]+)$/\1/p' "$src/Makefile" | head -n1)
+          sublevel=$(sed -nE 's/^SUBLEVEL = ([0-9]+)$/\1/p' "$src/Makefile" | head -n1)
+          test "$version.$patchlevel.$sublevel" = "$KERNEL_VERSION"
+          config="upstream/kernel-meta/$KERNEL_CONFIG"
+          echo "$KERNEL_CONFIG_SHA256  $config" | sha256sum --check
+          install -D -m 0644 "$config" "upstream/ophub/compile-kernel/tools/config/config-${KERNEL_SERIES%.y}"
+          git -C upstream/ophub log -1 --format='%H %s'
+          git -C "$src" log -1 --format='%H %s'
+      - name: Pin recompile to the checked-out Ophub helper
+        run: python3 scripts/prepare_locked_recompile.py --ophub upstream/ophub
+      - name: Install the hash-verified Ophub ARM GNU toolchain
+        env:
+          TOOLCHAIN_URL: ${{ needs.resolve.outputs.toolchain_url }}
+          TOOLCHAIN_ASSET: ${{ needs.resolve.outputs.toolchain_asset }}
+          TOOLCHAIN_SHA256: ${{ needs.resolve.outputs.toolchain_sha256 }}
+        run: |
+          set -euo pipefail
+          toolchain_root="upstream/ophub/compile-kernel/tools/toolchain"
+          mkdir -p "$toolchain_root"
+          curl --fail --location --retry 3 "$TOOLCHAIN_URL" -o "$RUNNER_TEMP/$TOOLCHAIN_ASSET"
+          echo "$TOOLCHAIN_SHA256  $RUNNER_TEMP/$TOOLCHAIN_ASSET" | sha256sum --check
+          tar -xJf "$RUNNER_TEMP/$TOOLCHAIN_ASSET" -C "$toolchain_root"
+          test -x "$toolchain_root/${TOOLCHAIN_ASSET%.tar.xz}/bin/aarch64-none-linux-gnu-gcc"
+          "$toolchain_root/${TOOLCHAIN_ASSET%.tar.xz}/bin/aarch64-none-linux-gnu-gcc" --version | head -n1 | tee outputs-toolchain-version.txt
+      - name: Compile kernel packages from the locked source
+        env:
+          KERNEL_VERSION: ${{ needs.resolve.outputs.kernel_version }}
+          CONTAINER_DIGEST: ${{ needs.resolve.outputs.container_digest }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes docker.io
+          cd upstream/ophub
+          sudo bash ./recompile \
+            -r "ophub/linux-${{ needs.resolve.outputs.kernel_series }}@${{ needs.resolve.outputs.kernel_sha }}" \
+            -k "$KERNEL_VERSION" \
+            -a false \
+            -m all \
+            -t gcc \
+            -z xz \
+            -d false \
+            -i "ophub/armbian-resolute@$CONTAINER_DIGEST"
+          src="compile-kernel/kernel/linux-${{ needs.resolve.outputs.kernel_series }}-${{ needs.resolve.outputs.kernel_sha }}"
+          test "$(git -C "$src" rev-parse HEAD)" = "${{ needs.resolve.outputs.kernel_sha }}"
+      - name: Verify exact kernel packages and preserve build provenance
+        env:
+          KERNEL_VERSION: ${{ needs.resolve.outputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          archive="upstream/ophub/compile-kernel/output/deb-${KERNEL_VERSION}-ophub.tar.gz"
+          test -s "$archive"
+          mkdir -p "$RUNNER_TEMP/extracted-debs"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/extracted-debs"
+          mkdir -p outputs/kernel-debs
+          find "$RUNNER_TEMP/extracted-debs" -type f -name '*.deb' -exec cp -v {} outputs/kernel-debs/ \;
+          test "$(find outputs/kernel-debs -type f -name '*.deb' | wc -l)" -gt 0
+          python3 scripts/create_kernel_manifest.py \
+            --deb-dir outputs/kernel-debs \
+            --version "$KERNEL_VERSION" \
+            --out outputs/kernel-packages.json
+          cp "$RUNNER_TEMP/sources.lock.json" outputs/sources.lock.json
+          cp outputs-toolchain-version.txt outputs/toolchain-version.txt
+      - name: Upload kernel packages for the system image job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-kernel-packages-${{ github.run_id }}
+          path: |
+            outputs/kernel-debs/*.deb
+            outputs/kernel-packages.json
+            outputs/sources.lock.json
+            outputs/toolchain-version.txt
+          retention-days: 30
