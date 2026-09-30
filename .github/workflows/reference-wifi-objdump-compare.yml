@@ -1,0 +1,71 @@
+name: Reference Wi-Fi targeted objdump comparison
+run-name: Reference Wi-Fi objdump comparison (${{ inputs.pipeline_id || 'manual' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      pipeline_id:
+        description: "Orchestrator correlation token (leave blank for manual runs)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  compare-locked-artifacts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Download the two successful locked build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          reference_run=36789346056
+          reference_head=c8abd678052adb814647cb07886b35eabdc2794f
+          reference_artifact=reference-wifi-module-evidence-36789346056
+          current_run=36784582315
+          current_head=1059fe6393858b0ca1b7c3c6c061faae0bcff14b
+          current_artifact=w103d-mt76-preassoc-rlm-optional-ctx-candidate-36784582315
+
+          for pair in "$reference_run:$reference_head" "$current_run:$current_head"; do
+            run_id=${pair%%:*}
+            expected_head=${pair#*:}
+            metadata=$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" \
+              --json headSha,status,conclusion)
+            python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["headSha"]==sys.argv[2], d; assert d["status"]=="completed" and d["conclusion"]=="success", d' \
+              "$metadata" "$expected_head"
+          done
+
+          mkdir -p "$RUNNER_TEMP/wifi-objdump/reference" "$RUNNER_TEMP/wifi-objdump/current"
+          gh run download "$reference_run" --repo "$GITHUB_REPOSITORY" \
+            --name "$reference_artifact" --dir "$RUNNER_TEMP/wifi-objdump/reference"
+          gh run download "$current_run" --repo "$GITHUB_REPOSITORY" \
+            --name "$current_artifact" --dir "$RUNNER_TEMP/wifi-objdump/current"
+
+      - name: Install AArch64 inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils-aarch64-linux-gnu
+
+      - name: Disassemble only selected Wi-Fi functions
+        run: |
+          set -euo pipefail
+          python3 scripts/compare_reference_wifi_objdump.py \
+            --reference "$RUNNER_TEMP/wifi-objdump/reference" \
+            --current "$RUNNER_TEMP/wifi-objdump/current" \
+            --output-dir "$RUNNER_TEMP/wifi-objdump/comparison"
+
+      - name: Upload targeted disassembly and comparison report
+        if: ${{ success() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: reference-wifi-objdump-comparison-${{ github.run_id }}
+          path: ${{ runner.temp }}/wifi-objdump/comparison/*
+          if-no-files-found: error
+          retention-days: 7
