@@ -1,0 +1,119 @@
+name: Reference Wi-Fi module evidence
+run-name: Reference Wi-Fi module evidence (${{ inputs.pipeline_id || 'manual' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      pipeline_id:
+        description: "Orchestrator correlation token (leave blank for manual runs)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  reference-wifi-modules:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Download pinned reference ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(jq -r .release_tag config/reference.lock.json)
+          asset=$(jq -r .asset_name config/reference.lock.json)
+          mkdir -p "$RUNNER_TEMP/reference"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$asset" --dir "$RUNNER_TEMP/reference"
+
+      - name: Validate ZIP and image hashes
+        run: |
+          set -euo pipefail
+          python3 scripts/validate_reference_zip.py \
+            --zip "$RUNNER_TEMP/reference/$(jq -r .asset_name config/reference.lock.json)" \
+            --lock config/reference.lock.json \
+            --output-dir "$RUNNER_TEMP/reference/unpacked" \
+            | tee "$RUNNER_TEMP/reference-validation.json"
+
+      - name: Install read-only image inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes mtools e2fsprogs device-tree-compiler \
+            abootimg lz4 kmod xz-utils binutils-aarch64-linux-gnu
+
+      - name: Pin and inspect Linux packer
+        run: |
+          set -euo pipefail
+          commit=$(jq -r .khadas_utils_commit config/toolchain.lock.json)
+          expected=$(jq -r .packer_sha256 config/toolchain.lock.json)
+          url="https://raw.githubusercontent.com/khadas/utils/${commit}/aml-flash-tool/tools/linux-x86/aml_image_v2_packer"
+          curl --fail --location --retry 3 "$url" --output "$RUNNER_TEMP/aml_image_v2_packer"
+          echo "$expected  $RUNNER_TEMP/aml_image_v2_packer" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/aml_image_v2_packer"
+          "$RUNNER_TEMP/aml_image_v2_packer" -c \
+            "$RUNNER_TEMP/reference/unpacked/W103D_Armbian_26.8.1_Server.img" \
+            | tee "$RUNNER_TEMP/reference-container-check.log"
+          grep -q 'Image check OK' "$RUNNER_TEMP/reference-container-check.log"
+          mkdir -p "$RUNNER_TEMP/reference/components"
+          "$RUNNER_TEMP/aml_image_v2_packer" -d \
+            "$RUNNER_TEMP/reference/unpacked/W103D_Armbian_26.8.1_Server.img" \
+            "$RUNNER_TEMP/reference/components" \
+            > "$RUNNER_TEMP/reference-unpack.log" 2>&1
+
+      - name: Export allowlisted reference Wi-Fi modules
+        run: |
+          set -euo pipefail
+          python3 scripts/export_reference_wifi_modules.py \
+            --components "$RUNNER_TEMP/reference/components" \
+            --reference-lock config/reference.lock.json \
+            --output-dir "$RUNNER_TEMP/reference/module-evidence"
+          python3 - "$RUNNER_TEMP/reference/module-evidence/report.json" \
+            "$RUNNER_TEMP/reference/module-evidence/modules" config/reference.lock.json <<'PY'
+          import hashlib, json, pathlib, sys
+          report = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          lock = json.loads(pathlib.Path(sys.argv[3]).read_text())
+          files = pathlib.Path(sys.argv[2])
+          assert report["source"]["image_sha256"] == lock["image_sha256"]
+          assert report["source"]["release_tag"] == lock["release_tag"]
+          assert report["source"]["asset"] == lock["asset_name"]
+          assert report["source"]["zip_sha256"] == lock["zip_sha256"]
+          assert report["source"]["member"] == lock["member_name"]
+          assert report["dependency_closure_complete"] is True
+          assert len(report["modules"]) == 8
+          for item in report["modules"]:
+              module = files / (item["name"] + ".ko")
+              assert module.is_file()
+              assert hashlib.sha256(module.read_bytes()).hexdigest() == item["uncompressed_sha256"]
+              elf = item["elf"]
+              assert elf["elf_class"] == "ELF64", f'{item["name"]}: expected ELF64, got {elf["elf_class"]!r}'
+              assert elf["elf_machine"] == "AArch64", f'{item["name"]}: expected AArch64, got {elf["elf_machine"]!r}'
+              assert elf["gnu_build_id"], f'{item["name"]}: GNU build ID missing'
+              assert item["modinfo"]["vermagic"]["available"], f'{item["name"]}: modinfo vermagic unavailable'
+              assert any(value.startswith("6.18.52-ophub ") for value in item["modinfo"]["vermagic"]["values"]), \
+                  f'{item["name"]}: unexpected vermagic {item["modinfo"]["vermagic"]["values"]!r}'
+              symbols = item["symbol_table"]
+              assert symbols["available"] and symbols["exit_code"] == 0, \
+                  f'{item["name"]}: aarch64-linux-gnu-nm failed: {symbols.get("reason", symbols.get("exit_code"))}'
+              assert symbols["readelf_exit_code"] == 0, f'{item["name"]}: aarch64-linux-gnu-readelf -Ws failed'
+              for sidecar in (symbols["full_nm_path"], symbols["full_readelf_symbols_path"]):
+                  sidecar_path = pathlib.Path(sys.argv[1]).parent / sidecar
+                  assert sidecar_path.is_file() and sidecar_path.stat().st_size > 0, \
+                      f'{item["name"]}: symbol sidecar missing/empty: {sidecar}'
+          PY
+
+      - name: Upload reference module evidence
+        if: ${{ success() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: reference-wifi-module-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/reference/module-evidence/report.json
+            ${{ runner.temp }}/reference/module-evidence/modules/*.ko
+            ${{ runner.temp }}/reference/module-evidence/symbols/*.txt
+          if-no-files-found: error
+          retention-days: 7
