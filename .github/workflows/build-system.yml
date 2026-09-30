@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       kernel_run_id:
-        description: "Successful compile-kernel.yml Actions run ID"
+        description: "Successful compile-kernel run or successful recovery run containing the verified kernel artifact"
         required: true
         type: string
 
@@ -32,14 +32,50 @@ jobs:
           set -euo pipefail
           run_id="$KERNEL_RUN_ID"
           [[ "$run_id" =~ ^[0-9]+$ ]]
-          gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status,conclusion,workflowName,headSha > "$RUNNER_TEMP/kernel-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$RUNNER_TEMP/kernel-run.json"
           python3 - <<'PY'
           import json, os
-          run = json.load(open(os.environ['RUNNER_TEMP'] + '/kernel-run.json'))
-          if run['status'] != 'completed' or run['conclusion'] != 'success' or run['workflowName'] != 'Compile pinned Ophub W103D kernel':
-              raise SystemExit(f"kernel run is not a successful completed compile: {run}")
+          run=json.load(open(os.environ['RUNNER_TEMP']+'/kernel-run.json'))
+          if run.get('status') != 'completed' or run.get('conclusion') != 'success':
+              raise SystemExit(f"kernel artifact run must have succeeded: {run.get('status')} {run.get('conclusion')}")
+          expected={
+              '.github/workflows/compile-kernel.yml':('Compile pinned Ophub W103D kernel',f"w103d-kernel-build-{run['id']}"),
+              '.github/workflows/recover-kernel-artifact.yml':('Recover and verify existing W103D kernel artifact',f"w103d-kernel-recovery-{run['id']}"),
+          }
+          if run.get('path') not in expected or run.get('name') != expected[run['path']][0]:
+              raise SystemExit(f"kernel artifact came from an unapproved workflow path/name: {run.get('path')} {run.get('name')}")
+          open(os.environ['RUNNER_TEMP']+'/kernel-artifact-name','w').write(expected[run['path']][1])
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+              output.write('artifact_name='+expected[run['path']][1]+'\n')
           PY
-          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "w103d-kernel-build-$run_id" --dir "$RUNNER_TEMP/kernel-artifact"
+          artifact_name=$(cat "$RUNNER_TEMP/kernel-artifact-name")
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "$artifact_name" --dir "$RUNNER_TEMP/kernel-artifact"
+          if [ -f "$RUNNER_TEMP/kernel-artifact/recovery-provenance.json" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/kernel-artifact/recovery-provenance.json"))["source_compile_run_id"])')" > "$RUNNER_TEMP/kernel-source-run.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/kernel-artifact/recovery-provenance.json"))["source_compile_run_id"])')/jobs?per_page=100" > "$RUNNER_TEMP/kernel-source-jobs.json"
+            python3 - <<'PY'
+          import json, os
+          run_id=os.environ['KERNEL_RUN_ID']
+          p=json.load(open(os.environ['RUNNER_TEMP']+'/kernel-artifact/recovery-provenance.json'))
+          manifest=json.load(open(os.environ['RUNNER_TEMP']+'/kernel-artifact/kernel-input-manifest.json'))
+          source=json.load(open(os.environ['RUNNER_TEMP']+'/kernel-source-run.json'))
+          source_jobs=json.load(open(os.environ['RUNNER_TEMP']+'/kernel-source-jobs.json'))['jobs']
+          if p.get('recovery_run_id') != run_id or p.get('source_compile_workflow_path') != '.github/workflows/compile-kernel.yml':
+              raise SystemExit(f"recovery provenance is not linked to this successful recovery workflow: {p}")
+          if p.get('source_compile_step_conclusion') != 'success' or p.get('source_verification_step_conclusion') != 'failure' or p.get('source_failure_signature') != 'rg: command not found':
+              raise SystemExit(f"recovery provenance does not show verifier-only failure: {p}")
+          if p.get('revalidation','').split(':',1)[0] != 'passed':
+              raise SystemExit(f"recovery did not validate its kernel payload: {p}")
+          if source.get('path') != p.get('source_compile_workflow_path') or source.get('head_sha') != p.get('source_compile_head_sha') or source.get('conclusion') != 'failure':
+              raise SystemExit(f"recovery source run no longer matches immutable provenance: {source} {p}")
+          compile_job=next((j for j in source_jobs if j.get('name')=='compile'),None)
+          steps={s.get('name'):s.get('conclusion') for s in (compile_job or {}).get('steps',[])}
+          if steps.get('Compile kernel packages from the locked source')!='success' or steps.get('Verify exact kernel packages and preserve build provenance')!='failure' or steps.get('Upload kernel build results and diagnostics')!='success':
+              raise SystemExit(f"original compile run no longer meets recovery criteria: {steps}")
+          if manifest.get('archive_sha256') != p.get('source_runtime_archive_sha256'):
+              raise SystemExit('recovery kernel archive SHA does not match its source artifact provenance')
+          PY
+          fi
           python3 scripts/prepare_kernel_input.py \
             --artifact-dir "$RUNNER_TEMP/kernel-artifact" \
             --output-dir "$RUNNER_TEMP/kernel-input" \

@@ -1,0 +1,106 @@
+name: Recover and verify existing W103D kernel artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Completed compile-kernel run whose only failure was the missing rg verifier command"
+        required: true
+        type: string
+      expected_head_sha:
+        description: "Exact commit from the source compile run"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Authenticate recovery to the exact source compile run and failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$RUNNER_TEMP/source-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100" > "$RUNNER_TEMP/source-jobs.json"
+          python3 - <<'PY'
+          import json, os
+          run=json.load(open(os.environ['RUNNER_TEMP']+'/source-run.json'))
+          jobs=json.load(open(os.environ['RUNNER_TEMP']+'/source-jobs.json'))['jobs']
+          expected_path='.github/workflows/compile-kernel.yml'
+          if run.get('path') != expected_path or run.get('head_sha') != os.environ['EXPECTED_HEAD_SHA']:
+              raise SystemExit(f"source run path/commit mismatch: path={run.get('path')} sha={run.get('head_sha')}")
+          if run.get('status') != 'completed' or run.get('conclusion') != 'failure':
+              raise SystemExit(f"source run must be completed with verifier-only failure: {run.get('status')} {run.get('conclusion')}")
+          compile_job=next((j for j in jobs if j.get('name') == 'compile'), None)
+          if compile_job is None:
+              raise SystemExit('source run has no compile job')
+          steps={s.get('name'):s.get('conclusion') for s in compile_job.get('steps',[])}
+          if steps.get('Compile kernel packages from the locked source') != 'success':
+              raise SystemExit(f"kernel compilation was not successful: {steps}")
+          if steps.get('Verify exact kernel packages and preserve build provenance') != 'failure':
+              raise SystemExit(f"source failure was not isolated to the verifier: {steps}")
+          if steps.get('Upload kernel build results and diagnostics') != 'success':
+              raise SystemExit(f"source kernel artifact was not uploaded: {steps}")
+          PY
+          gh run view "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --log-failed > "$RUNNER_TEMP/source-failure.log" || true
+          python3 - <<'PY'
+          import os
+          text=open(os.environ['RUNNER_TEMP']+'/source-failure.log',errors='replace').read()
+          if 'rg: command not found' not in text:
+              raise SystemExit('source logs do not contain the reviewed missing-rg verifier failure')
+          PY
+
+      - name: Download the already compiled artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "w103d-kernel-build-$SOURCE_RUN_ID" --dir "$RUNNER_TEMP/source-artifact"
+
+      - name: Revalidate debs and nested Ophub kernel archives without compiling
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/recover_kernel_artifact.py \
+            --artifact-dir "$RUNNER_TEMP/source-artifact" \
+            --output-dir "$RUNNER_TEMP/recovered" \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --source-head-sha "$SOURCE_HEAD_SHA" \
+            --source-log "$RUNNER_TEMP/source-failure.log" \
+            --recovery-run-id "$GITHUB_RUN_ID"
+
+      - name: Preserve recovery diagnostics
+        if: always()
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/recovery-diagnostics"
+          cp "$RUNNER_TEMP/source-run.json" "$RUNNER_TEMP/source-jobs.json" "$RUNNER_TEMP/source-failure.log" "$RUNNER_TEMP/recovery-diagnostics/" 2>/dev/null
+          find "$RUNNER_TEMP/source-artifact" -type f -printf '%P %s bytes\n' 2>/dev/null | sort > "$RUNNER_TEMP/recovery-diagnostics/source-artifact-files.txt"
+
+      - name: Upload recovery diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-kernel-recovery-diagnostics-${{ github.run_id }}
+          path: ${{ runner.temp }}/recovery-diagnostics/**
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload the verified kernel feed and recovery provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-kernel-recovery-${{ github.run_id }}
+          path: ${{ runner.temp }}/recovered/recovered-kernel-input/**
+          if-no-files-found: error
+          retention-days: 30

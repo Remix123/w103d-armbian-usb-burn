@@ -74,6 +74,20 @@ def find_exact_mount_path(mounts: list[Path], relpaths: list[Path], label: str) 
     return found[0]
 
 
+def module_relative_path(member_name: str, release: str) -> Path:
+    parts = PurePosixPath(member_name).parts
+    relative_parts = None
+    if parts and parts[0] == release:
+        relative_parts = parts[1:]
+    elif len(parts) >= 4 and parts[:2] == ("lib", "modules") and parts[2] == release:
+        relative_parts = parts[3:]
+    elif len(parts) >= 5 and parts[:3] == ("usr", "lib", "modules") and parts[3] == release:
+        relative_parts = parts[4:]
+    if relative_parts is None or not relative_parts:
+        raise SystemExit(f"kernel module archive member is outside the exact release root {release}: {member_name}")
+    return Path(*relative_parts)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--images-dir", type=Path, required=True)
@@ -167,13 +181,8 @@ def main() -> int:
             module_hashes = []
             with tarfile.open(fileobj=io.BytesIO(modules_blob), mode="r:*") as modules_tar:
                 for member in module_members:
-                    parts = PurePosixPath(member.name).parts
-                    if "modules" in parts:
-                        index = parts.index("modules")
-                        rel = Path(*parts[index + 1:])
-                    else:
-                        rel = Path(*parts[-3:])
-                    actual = module_root / rel.relative_to(release) if rel.parts and rel.parts[0] == release else module_root / rel
+                    relative_path = module_relative_path(member.name, release)
+                    actual = module_root / relative_path
                     if not actual.is_file():
                         raise SystemExit(f"rebuilt image is missing kernel module {member.name} at {actual}")
                     stream = modules_tar.extractfile(member)
