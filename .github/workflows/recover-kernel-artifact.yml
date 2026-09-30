@@ -33,8 +33,11 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$RUNNER_TEMP/source-run.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100" > "$RUNNER_TEMP/source-jobs.json"
           python3 - <<'PY'
-          import json, os
+          import json, os, sys
+          sys.path.insert(0, 'scripts')
+          from workflow_run_guard import validate_run_workflow, gh_workflow_lookup
           run=json.load(open(os.environ['RUNNER_TEMP']+'/source-run.json'))
+          validate_run_workflow(run, os.environ['GITHUB_REPOSITORY'], gh_workflow_lookup(os.environ['GITHUB_REPOSITORY']), require_success=False)
           jobs=json.load(open(os.environ['RUNNER_TEMP']+'/source-jobs.json'))['jobs']
           expected_path='.github/workflows/compile-kernel.yml'
           if run.get('path') != expected_path or run.get('head_sha') != os.environ['EXPECTED_HEAD_SHA']:

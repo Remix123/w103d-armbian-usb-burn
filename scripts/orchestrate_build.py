@@ -10,6 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 from urllib.parse import quote
+from workflow_run_guard import gh_workflow_lookup, validate_run_workflow
 
 
 WORKFLOWS = {
@@ -42,12 +43,13 @@ def select_correlated_run(runs: list[dict], *, pipeline_id: str, tag: str, head_
     return matches[0]
 
 
-def checked_run(run_id: str, path: str, name: str) -> dict:
+def checked_run(run_id: str, path: str) -> dict:
     run = json.loads(gh("api", f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run_id}"))
     if str(run.get("id")) != run_id or run.get("status") != "completed" or run.get("conclusion") != "success":
         raise ValueError(f"reuse run {run_id} is not completed successfully")
-    if run.get("path") != path or run.get("name") != name:
-        raise ValueError(f"reuse run {run_id} is not from the approved workflow {path}: {run.get('path')} {run.get('name')}")
+    if run.get("path") != path:
+        raise ValueError(f"reuse run {run_id} is not from the approved workflow path {path}: {run.get('path')}")
+    validate_run_workflow(run, os.environ["GITHUB_REPOSITORY"], gh_workflow_lookup(os.environ["GITHUB_REPOSITORY"]))
     return run
 
 
@@ -88,6 +90,7 @@ def wait_for_child(stage: str, input_args: list[str], state: dict, stage_timeout
     while time.monotonic() < deadline:
         try:
             run = select_correlated_run(api_runs(workflow, tag), pipeline_id=pipeline_id, tag=tag, head_sha=head_sha, workflow_path=path)
+            validate_run_workflow(run, os.environ["GITHUB_REPOSITORY"], gh_workflow_lookup(os.environ["GITHUB_REPOSITORY"]), require_success=False)
             break
         except ValueError as error:
             if "found []" not in str(error):
@@ -105,6 +108,7 @@ def wait_for_child(stage: str, input_args: list[str], state: dict, stage_timeout
     last_status = None
     while time.monotonic() < deadline:
         fresh = json.loads(gh("api", f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{child['run_id']}"))
+        validate_run_workflow(fresh, os.environ["GITHUB_REPOSITORY"], gh_workflow_lookup(os.environ["GITHUB_REPOSITORY"]), require_success=False)
         if fresh.get("path") != path or fresh.get("head_branch") != tag or fresh.get("head_sha") != head_sha or pipeline_id not in fresh.get("display_title", ""):
             raise ValueError(f"child run provenance changed after dispatch: {fresh}")
         status = fresh.get("status")
@@ -141,12 +145,12 @@ def main() -> None:
     summary(f"## W103D source build pipeline `{pipeline_id}`\n\nFixed source ref: `{tag}` -> `{head_sha}`. Each stage is a separate workflow run and is correlated by this tag, SHA, workflow path, and token. Any failed stage stops delivery.")
 
     if reuse_usb:
-        run = checked_run(reuse_usb, WORKFLOWS["usb"][1], WORKFLOWS["usb"][2])
+        run = checked_run(reuse_usb, WORKFLOWS["usb"][1])
         summary(f"- reusing verified USB run [{reuse_usb}]({run['html_url']})")
         usb_run = reuse_usb
     else:
         if reuse_system:
-            run = checked_run(reuse_system, WORKFLOWS["system"][1], WORKFLOWS["system"][2])
+            run = checked_run(reuse_system, WORKFLOWS["system"][1])
             summary(f"- reusing verified system run [{reuse_system}]({run['html_url']})")
             system_run = reuse_system
         else:
@@ -155,7 +159,7 @@ def main() -> None:
             system_run = wait_for_child("system", [["kernel_run_id", kernel_run]], state, 170 * 60)
         usb_run = wait_for_child("usb", [["system_run_id", system_run]], state, 170 * 60)
     zip_run = wait_for_child("zip", [["usb_run_id", usb_run]], state, 170 * 60)
-    zip_run_info = checked_run(zip_run, WORKFLOWS["zip"][1], WORKFLOWS["zip"][2])
+    zip_run_info = checked_run(zip_run, WORKFLOWS["zip"][1])
     artifacts = json.loads(gh("api", f"repos/{repo}/actions/runs/{zip_run}/artifacts?per_page=100"))["artifacts"]
     zip_artifacts = [a for a in artifacts if a.get("name", "").endswith("_USB_Burning_Tool.zip") and not a.get("expired")]
     if len(zip_artifacts) != 1:

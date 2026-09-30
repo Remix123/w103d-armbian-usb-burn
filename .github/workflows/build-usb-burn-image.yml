@@ -38,12 +38,15 @@ jobs:
           [[ "$SYSTEM_RUN_ID" =~ ^[0-9]+$ ]]
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SYSTEM_RUN_ID" > "$RUNNER_TEMP/system-run.json"
           python3 - <<'PY'
-          import json, os
+          import json, os, sys
+          sys.path.insert(0, 'scripts')
+          from workflow_run_guard import validate_run_workflow, gh_workflow_lookup
           run=json.load(open(os.environ['RUNNER_TEMP']+'/system-run.json'))
+          validate_run_workflow(run, os.environ['GITHUB_REPOSITORY'], gh_workflow_lookup(os.environ['GITHUB_REPOSITORY']))
           if run.get('status')!='completed' or run.get('conclusion')!='success':
               raise SystemExit(f"system workflow has not succeeded: {run.get('status')} {run.get('conclusion')}")
-          if run.get('path')!='.github/workflows/build-system.yml' or run.get('name')!='Rebuild W103D Trixie system with pinned Ophub kernel':
-              raise SystemExit(f"system artifact came from unapproved workflow: {run.get('path')} {run.get('name')}")
+          if run.get('path')!='.github/workflows/build-system.yml':
+              raise SystemExit(f"system artifact came from unapproved workflow path: {run.get('path')}")
           with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write(f"artifact=w103d-rebuilt-system-{run['id']}\n")
           PY
           gh run download "$SYSTEM_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "w103d-rebuilt-system-$SYSTEM_RUN_ID" --dir "$RUNNER_TEMP/system"
@@ -86,14 +89,17 @@ jobs:
           elif [ "$archive_count" -eq 0 ]; then
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$kernel_run" > "$RUNNER_TEMP/kernel-source-run.json"
             python3 - <<'PY'
-          import json, os
+          import json, os, sys
+          sys.path.insert(0, 'scripts')
+          from workflow_run_guard import validate_run_workflow, gh_workflow_lookup
           run=json.load(open(os.environ['RUNNER_TEMP']+'/kernel-source-run.json'))
+          validate_run_workflow(run, os.environ['GITHUB_REPOSITORY'], gh_workflow_lookup(os.environ['GITHUB_REPOSITORY']))
           expected={
               '.github/workflows/compile-kernel.yml':('Compile pinned Ophub W103D kernel',f"w103d-kernel-build-{run.get('id')}"),
               '.github/workflows/recover-kernel-artifact.yml':('Recover and verify existing W103D kernel artifact',f"w103d-kernel-recovery-{run.get('id')}")
           }
-          if run.get('status')!='completed' or run.get('conclusion')!='success' or run.get('path') not in expected or run.get('name')!=expected[run['path']][0]:
-              raise SystemExit(f"kernel source run is not an approved successful immutable artifact: {run}")
+          if run.get('path') not in expected:
+              raise SystemExit(f"kernel source run is not an approved immutable artifact: {run}")
           with open(os.environ['GITHUB_OUTPUT'],'a') as output: output.write(f"artifact_name={expected[run['path']][1]}\n")
           PY
             artifact_name=$(python3 -c 'import json,os; r=json.load(open(os.environ["RUNNER_TEMP"]+"/kernel-source-run.json")); print(("w103d-kernel-build-" if r["path"].endswith("compile-kernel.yml") else "w103d-kernel-recovery-")+str(r["id"]))')

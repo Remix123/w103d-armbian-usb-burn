@@ -38,12 +38,15 @@ jobs:
           [[ "$USB_RUN_ID" =~ ^[0-9]+$ ]]
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$USB_RUN_ID" > "$RUNNER_TEMP/usb-run.json"
           python3 - <<'PY'
-          import json, os
+          import json, os, sys
+          sys.path.insert(0, 'scripts')
+          from workflow_run_guard import validate_run_workflow, gh_workflow_lookup
           run=json.load(open(os.environ['RUNNER_TEMP']+'/usb-run.json'))
+          validate_run_workflow(run, os.environ['GITHUB_REPOSITORY'], gh_workflow_lookup(os.environ['GITHUB_REPOSITORY']))
           if run.get('status')!='completed' or run.get('conclusion')!='success':
               raise SystemExit(f"USB build run has not succeeded: {run.get('status')} {run.get('conclusion')}")
-          if run.get('path')!='.github/workflows/build-usb-burn-image.yml' or run.get('name')!='Assemble and validate W103D USB Burning Tool image':
-              raise SystemExit(f"USB input came from an unapproved workflow path/name: {run.get('path')} {run.get('name')}")
+          if run.get('path')!='.github/workflows/build-usb-burn-image.yml':
+              raise SystemExit(f"USB input came from an unapproved workflow path: {run.get('path')}")
           PY
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$USB_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/usb-artifacts.json"
           python3 - <<'PY'
