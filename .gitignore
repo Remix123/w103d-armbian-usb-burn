@@ -1,0 +1,6 @@
+work/
+outputs/
+*.img
+*.img.gz
+*.zip
+!config/*.json

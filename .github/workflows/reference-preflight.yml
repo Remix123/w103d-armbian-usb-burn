@@ -1,0 +1,49 @@
+name: Reference image preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 
+      - name: Download pinned reference ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(jq -r .release_tag config/reference.lock.json)
+          asset=$(jq -r .asset_name config/reference.lock.json)
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$RUNNER_TEMP/reference"
+      - name: Validate ZIP and image hashes
+        run: |
+          python3 scripts/validate_reference_zip.py \
+            --zip "$RUNNER_TEMP/reference/W103D_Armbian_26.8.1_Server.zip" \
+            --lock config/reference.lock.json \
+            --output-dir "$RUNNER_TEMP/reference/unpacked" \
+            | tee "$RUNNER_TEMP/reference-validation.json"
+      - name: Pin and inspect Linux packer
+        run: |
+          set -euo pipefail
+          commit=$(jq -r .khadas_utils_commit config/toolchain.lock.json)
+          expected=$(jq -r .packer_sha256 config/toolchain.lock.json)
+          url="https://raw.githubusercontent.com/khadas/utils/${commit}/aml-flash-tool/tools/linux-x86/aml_image_v2_packer"
+          curl --fail --location --retry 3 "$url" --output "$RUNNER_TEMP/aml_image_v2_packer"
+          echo "$expected  $RUNNER_TEMP/aml_image_v2_packer" | sha256sum --check
+          file "$RUNNER_TEMP/aml_image_v2_packer"
+          chmod +x "$RUNNER_TEMP/aml_image_v2_packer"
+          "$RUNNER_TEMP/aml_image_v2_packer" -c "$RUNNER_TEMP/reference/unpacked/W103D_Armbian_26.8.1_Server.img" | tee "$RUNNER_TEMP/reference-container-check.log"
+          grep -q 'Image check OK' "$RUNNER_TEMP/reference-container-check.log"
+      - name: Upload preflight evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a 
+        with:
+          name: reference-preflight
+          path: |
+            ${{ runner.temp }}/reference-container-check.log
+            ${{ runner.temp }}/reference-validation.json
+          retention-days: 7

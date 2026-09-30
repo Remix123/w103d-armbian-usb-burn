@@ -1,0 +1,7 @@
+{
+  "khadas_utils_commit": "a3604ed6d6863d1946d26d0ac8e765aef6f17430",
+  "packer_path": "aml-flash-tool/tools/linux-x86/aml_image_v2_packer",
+  "packer_sha256": "8123b1295abb3262c76b650ba024975e38aedfd49b19f59a09f5920738ef1597",
+  "packer_architecture": "ELF32 Intel 80386, static",
+  "packer_runner_architecture": "x86_64 Linux with IA32 execution support"
+}

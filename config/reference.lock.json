@@ -1,0 +1,8 @@
+{
+  "release_tag": "reference-input-2026-09-30",
+  "asset_name": "W103D_Armbian_26.8.1_Server.zip",
+  "zip_sha256": "7db21d4bba6e13a2176eed81894433f2dadd8acf1c4a0cd6bac9f64797a47dc5",
+  "member_name": "W103D_Armbian_26.8.1_Server.img",
+  "image_size": 1919320976,
+  "image_sha256": "60b0c3355eda080cdf0c350e063bb6c8ac664f0dea872f5d5377d8a53503159d"
+}
