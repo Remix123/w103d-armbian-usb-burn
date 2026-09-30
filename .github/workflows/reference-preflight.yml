@@ -9,6 +9,11 @@ on:
         required: false
         type: string
         default: ""
+      audit_wifi:
+        description: "Extract read-only Wi-Fi/kernel metadata from the pinned reference rootfs"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -62,7 +67,17 @@ jobs:
             --legacy-lock config/legacy-reference-components.json \
             --out "$RUNNER_TEMP/reference-layout.json" \
             | tee "$RUNNER_TEMP/reference-inspection-summary.json"
+      - name: Audit reference Wi-Fi and kernel metadata
+        if: ${{ inputs.audit_wifi }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install --yes kmod
+          python3 scripts/audit_reference_wifi.py \
+            --components "$RUNNER_TEMP/reference/components" \
+            --out "$RUNNER_TEMP/reference-wifi-audit.json" \
+            | tee "$RUNNER_TEMP/reference-wifi-audit-summary.json"
       - name: Upload preflight evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: reference-preflight-${{ github.run_id }}
@@ -72,4 +87,7 @@ jobs:
             ${{ runner.temp }}/reference-unpack.log
             ${{ runner.temp }}/reference-layout.json
             ${{ runner.temp }}/reference-inspection-summary.json
+            ${{ runner.temp }}/reference-wifi-audit.json
+            ${{ runner.temp }}/reference-wifi-audit-summary.json
+          if-no-files-found: warn
           retention-days: 30
