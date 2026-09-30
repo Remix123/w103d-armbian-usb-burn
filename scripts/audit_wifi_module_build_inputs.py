@@ -255,7 +255,9 @@ def audit_archive(args: argparse.Namespace, metadata: dict, report: dict) -> Non
                 report["module_path_count"]=len(dep_paths)
                 selected=[]
                 for name in MODULES:
-                    candidates=[p for p in dep_paths if re.search(r"(?:^|/)"+re.escape(name)+r"\.ko(?:\.(?:xz|zst|gz))?$",p)]
+                    # Module names in module tooling normalize '-' and '_' to the same name.
+                    archive_basename = re.escape(name).replace("_", "[-_]")
+                    candidates=[p for p in dep_paths if re.search(r"(?:^|/)"+archive_basename+r"\.ko(?:\.(?:xz|zst|gz))?$",p)]
                     if len(candidates)>1:
                         report["errors"].append(f"module path ambiguous: {name}");continue
                     if not candidates:
