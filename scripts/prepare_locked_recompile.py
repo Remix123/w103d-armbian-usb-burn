@@ -19,7 +19,18 @@ def main() -> int:
            '    docker exec "${docker_container}" chmod 0755 "${docker_script}"')
     if source.count(old) != 1:
         raise SystemExit("pinned recompile wrapper no longer has the expected update call; inspect before adapting")
-    wrapper.write_text(source.replace(old, new))
+    source = source.replace(old, new)
+    # The helper assumes its working directory is /opt/kernel. Docker's default
+    # is /, which makes relative config/source paths resolve outside the mount.
+    source = source.replace('docker exec -i "${docker_container}"',
+                            'docker exec -i -w /opt/kernel "${docker_container}"')
+    # The replacement above also needs to cover the one non-interactive chmod
+    # command inserted above; keep its explicit chmod call working unchanged.
+    if source.count('docker exec -i -w /opt/kernel "${docker_container}"') < 3:
+        raise SystemExit("expected all helper docker exec calls to be patched with /opt/kernel working directory")
+    if "set -e" not in source.splitlines()[1:6]:
+        source = source.replace("#!/bin/bash\n", "#!/bin/bash\nset -e\n", 1)
+    wrapper.write_text(source)
     helper_source = helper.read_text()
     old_toolchain = 'toolchain_path="/usr/local/toolchain"'
     new_toolchain = 'toolchain_path="/opt/kernel/compile-kernel/tools/toolchain"'

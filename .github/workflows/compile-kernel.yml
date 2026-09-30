@@ -136,6 +136,26 @@ jobs:
             -i "ophub/armbian-resolute@$CONTAINER_DIGEST"
           src="compile-kernel/kernel/linux-${{ needs.resolve.outputs.kernel_series }}-main"
           test "$(git -C "$src" rev-parse HEAD)" = "${{ needs.resolve.outputs.kernel_sha }}"
+      - name: Capture build diagnostics and any partial output
+        if: always()
+        env:
+          KERNEL_SERIES: ${{ needs.resolve.outputs.kernel_series }}
+          KERNEL_SHA: ${{ needs.resolve.outputs.kernel_sha }}
+        run: |
+          set +e
+          mkdir -p diagnostics
+          {
+            date -u --iso-8601=seconds
+            pwd
+            git -C upstream/ophub rev-parse HEAD
+            git -C "upstream/ophub/compile-kernel/kernel/linux-${KERNEL_SERIES}-main" rev-parse HEAD
+            test -d upstream/ophub/compile-kernel/output && find upstream/ophub/compile-kernel/output -maxdepth 3 -type f -printf '%p %s bytes\n' | sort
+            test -d upstream/ophub/compile-kernel/output && find upstream/ophub/compile-kernel/output -maxdepth 3 -type d -printf '%p/\n' | sort
+          } > diagnostics/build-state.txt 2>&1
+          cp "$RUNNER_TEMP/sources.lock.json" diagnostics/ 2>/dev/null || true
+          cp outputs-toolchain-version.txt diagnostics/ 2>/dev/null || true
+          docker ps -a > diagnostics/docker-ps.txt 2>&1 || true
+          docker logs armbian-ophub > diagnostics/container.log 2>&1 || true
       - name: Verify exact kernel packages and preserve build provenance
         env:
           KERNEL_VERSION: ${{ needs.resolve.outputs.kernel_version }}
@@ -158,14 +178,17 @@ jobs:
             --out outputs/kernel-packages.json
           cp "$RUNNER_TEMP/sources.lock.json" outputs/sources.lock.json
           cp outputs-toolchain-version.txt outputs/toolchain-version.txt
-      - name: Upload kernel packages for the system image job
+      - name: Upload kernel build results and diagnostics
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: w103d-kernel-packages-${{ github.run_id }}
+          name: w103d-kernel-build-${{ github.run_id }}
           path: |
+            diagnostics/**
             outputs/kernel-debs/*.deb
             outputs/kernel-packages.json
             outputs/sources.lock.json
             outputs/toolchain-version.txt
             upstream/ophub/compile-kernel/output/*.tar.gz
+          if-no-files-found: warn
           retention-days: 30
