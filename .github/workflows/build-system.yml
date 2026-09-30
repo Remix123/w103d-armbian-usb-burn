@@ -212,6 +212,7 @@ jobs:
         with:
           name: w103d-system-candidate-${{ github.run_id }}
           path: candidate/*.img.gz
+          archive: false
           if-no-files-found: warn
           retention-days: 30
 

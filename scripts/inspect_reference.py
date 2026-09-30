@@ -97,6 +97,8 @@ def sparse_to_raw(src: Path, dst: Path) -> dict:
                     raise ValueError(f"unknown sparse chunk type {kind:#x}")
             if logical != blocks * block_size or (expected_crc and crc != expected_crc):
                 raise ValueError("sparse image size or CRC mismatch")
+            if f.read(1):
+                raise ValueError("trailing bytes after Android sparse image chunks")
     return {"raw_bytes": blocks * block_size, "block_size": block_size, "blocks": blocks,
             "chunks": chunks, "crc32": f"{crc:08x}", "sha256": digest(dst)}
 

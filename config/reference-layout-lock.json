@@ -1,0 +1,20 @@
+{
+  "image_cfg": "[LIST_NORMAL]\nfile=\"DDR.USB\"\t\tmain_type=\"USB\"\t\tsub_type=\"DDR\"\tfile_type=\"normal\"\nfile=\"DDR.USB\"\t\tmain_type=\"USB\"\t\tsub_type=\"UBOOT\"\tfile_type=\"normal\"\nfile=\"_aml_dtb.PARTITION\"\t\tmain_type=\"dtb\"\t\tsub_type=\"meson1\"\tfile_type=\"normal\"\nfile=\"platform.conf\"\t\tmain_type=\"conf\"\t\tsub_type=\"platform\"\tfile_type=\"normal\"\n\n[LIST_VERIFY]\nfile=\"_aml_dtb.PARTITION\"\t\tmain_type=\"PARTITION\"\t\tsub_type=\"_aml_dtb\"\tfile_type=\"normal\"\nfile=\"boot.PARTITION\"\t\tmain_type=\"PARTITION\"\t\tsub_type=\"boot\"\tfile_type=\"normal\"\nfile=\"DDR.USB\"\t\tmain_type=\"PARTITION\"\t\tsub_type=\"bootloader\"\tfile_type=\"normal\"\nfile=\"data.PARTITION\"\t\tmain_type=\"PARTITION\"\t\tsub_type=\"data\"\tfile_type=\"sparse\"\nfile=\"dtbo.PARTITION\"\t\tmain_type=\"PARTITION\"\t\tsub_type=\"dtbo\"\tfile_type=\"normal\"\nfile=\"logo.PARTITION\"\t\tmain_type=\"PARTITION\"\t\tsub_type=\"logo\"\tfile_type=\"normal\"\nfile=\"recovery.PARTITION\"\t\tmain_type=\"PARTITION\"\t\tsub_type=\"recovery\"\tfile_type=\"normal\"\nfile=\"system.PARTITION\"\t\tmain_type=\"PARTITION\"\t\tsub_type=\"system\"\tfile_type=\"sparse\"\nfile=\"vbmeta.PARTITION\"\t\tmain_type=\"PARTITION\"\t\tsub_type=\"vbmeta\"\tfile_type=\"normal\"\n",
+  "component_sha256": {
+    "DDR.USB": "686bf51d624d29ac628b6ab681ec5b946e1dba71100ebbe3ef6e1c9755d69222",
+    "_aml_dtb.PARTITION": "cfba4e876887bddd7c01fe088f4e77f798a5b81ba935ed17de776803ecf8c4c9",
+    "boot.PARTITION": "c42fccec960b3bafa3443275368a4d6cfc982c1604e06e83c29a69188ea37d11",
+    "dtbo.PARTITION": "79dd4d50fb296ddcfb7f3416cc6384b531b0c9a8c47b76ef40e7d3731e197642",
+    "logo.PARTITION": "8363047ebca0d01063a2f041f312930eb6d8dfa7dec5d99c71d656aacb7d0b82",
+    "platform.conf": "1981261f893f6cf6c6c47ef5741b4d979ba926b126f238ca21e5ecd4c5467033",
+    "recovery.PARTITION": "c42fccec960b3bafa3443275368a4d6cfc982c1604e06e83c29a69188ea37d11",
+    "vbmeta.PARTITION": "d2e1979739ec67076a90b0fc625dae84a1aa2ed72d05d2b55d52539e3462b442"
+  },
+  "boot_files": {
+    "bootup.bmp": "4a6745db2664f273de42aac0baa3681819ceb5c434bec8eca110baee46e47ca2",
+    "emmc_autoscript": "3b9216b71c7526334834991b8df7a9774410d853f17fbb9d003ae904d646a691",
+    "emmc_autoscript.cmd": "5dfa55e48e7c32d8cd78027567876ee43745f4ac41ab67924d864a04edf28e62",
+    "u-boot.ext": "ea6077ff2b79d830fd4baa3e567cb1acadfca7758dfd978a74e0ac0892adbddb",
+    "uEnv.txt": "1cbf3b9d4e84efddc81535faeebc189e7e7ef4e6a3cd7f249ff57a2c959ae5d5"
+  }
+}

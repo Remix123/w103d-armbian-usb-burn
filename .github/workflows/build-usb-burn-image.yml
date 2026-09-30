@@ -1,0 +1,235 @@
+name: Assemble and validate W103D USB Burning Tool image
+
+on:
+  workflow_dispatch:
+    inputs:
+      system_run_id:
+        description: "Successful build-system run containing the Trixie W103D image and verification report"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: w103d-usb-burn-image
+  cancel-in-progress: false
+
+jobs:
+  assemble-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Verify system source run and download its successful artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYSTEM_RUN_ID: ${{ inputs.system_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SYSTEM_RUN_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SYSTEM_RUN_ID" > "$RUNNER_TEMP/system-run.json"
+          python3 - <<'PY'
+          import json, os
+          run=json.load(open(os.environ['RUNNER_TEMP']+'/system-run.json'))
+          if run.get('status')!='completed' or run.get('conclusion')!='success':
+              raise SystemExit(f"system workflow has not succeeded: {run.get('status')} {run.get('conclusion')}")
+          if run.get('path')!='.github/workflows/build-system.yml' or run.get('name')!='Rebuild W103D Trixie system with pinned Ophub kernel':
+              raise SystemExit(f"system artifact came from unapproved workflow: {run.get('path')} {run.get('name')}")
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write(f"artifact=w103d-rebuilt-system-{run['id']}\n")
+          PY
+          gh run download "$SYSTEM_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "w103d-rebuilt-system-$SYSTEM_RUN_ID" --dir "$RUNNER_TEMP/system"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'system'
+          reports=list(root.rglob('system-image-verification.json'))
+          manifests=list(root.rglob('kernel-input-manifest.json'))
+          locks=list(root.rglob('sources.lock.json'))
+          base_locks=list(root.rglob('base-image.lock.json'))
+          images=[p for p in root.rglob('*.img.gz') if p.is_file()]
+          if len(reports)!=1 or len(manifests)!=1 or len(locks)!=1 or len(base_locks)!=1 or len(images)!=1: raise SystemExit(f"unexpected system artifact contents: reports={reports}, manifests={manifests}, locks={locks}, base_locks={base_locks}, images={images}")
+          if json.loads(reports[0].read_text()).get('image_sha256') is None: raise SystemExit('system image verification report has no image hash')
+          manifest=json.loads(manifests[0].read_text())
+          lock=json.loads(locks[0].read_text())
+          if manifest.get('ophub_source_lock') != lock: raise SystemExit('system artifact source lock and kernel manifest disagree')
+          with open(os.environ['GITHUB_ENV'],'a') as f:
+              f.write('SOURCES_LOCK='+str(locks[0])+'\n')
+              f.write('KERNEL_MANIFEST='+str(manifests[0])+'\n')
+              f.write('BASE_IMAGE_LOCK='+str(base_locks[0])+'\n')
+              f.write('OPHUB_SHA='+lock['ophub']['commit']+'\n')
+          PY
+
+      - name: Download and validate locked kernel archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest=$(find "$RUNNER_TEMP/system" -type f -name kernel-input-manifest.json -print -quit)
+          version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel_version"])' "$manifest")
+          mkdir -p "$RUNNER_TEMP/kernel"
+          gh release download kernel_stable --repo "$GITHUB_REPOSITORY" --pattern "${version}.tar.gz" --dir "$RUNNER_TEMP/kernel"
+          archive="$RUNNER_TEMP/kernel/${version}.tar.gz"
+          expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive_sha256"])' "$manifest")
+          echo "$expected  $archive" | sha256sum --check
+          echo "KERNEL_ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Checkout the exact Ophub source containing W103D eMMC boot script
+        run: |
+          set -euo pipefail
+          git init "$RUNNER_TEMP/ophub-source"
+          git -C "$RUNNER_TEMP/ophub-source" remote add origin https://github.com/ophub/amlogic-s9xxx-armbian.git
+          git -C "$RUNNER_TEMP/ophub-source" fetch --depth=1 origin "$OPHUB_SHA"
+          git -C "$RUNNER_TEMP/ophub-source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/ophub-source" rev-parse HEAD)" = "$OPHUB_SHA"
+          test -s "$RUNNER_TEMP/ophub-source/build-armbian/armbian-files/platform-files/amlogic/bootfs/boot-emmc.cmd"
+          echo "OPHUB_BOOT_EMMC=$RUNNER_TEMP/ophub-source/build-armbian/armbian-files/platform-files/amlogic/bootfs/boot-emmc.cmd" >> "$GITHUB_ENV"
+
+      - name: Download and verify the reference ZIP input
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/reference-zip"
+          gh release download reference-input-2026-09-30 --repo "$GITHUB_REPOSITORY" \
+            --pattern W103D_Armbian_26.8.1_Server.zip --dir "$RUNNER_TEMP/reference-zip"
+          python3 scripts/validate_reference_zip.py \
+            --zip "$RUNNER_TEMP/reference-zip/W103D_Armbian_26.8.1_Server.zip" \
+            --lock config/reference.lock.json --output-dir "$RUNNER_TEMP/reference"
+
+      - name: Install Linux image tools and validate the pinned Amlogic packer
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes ca-certificates curl dosfstools e2fsprogs file gzip initramfs-tools-core mtools parted python3 rsync u-boot-tools util-linux zstd
+          git clone https://github.com/khadas/utils.git "$RUNNER_TEMP/khadas-utils"
+          git -C "$RUNNER_TEMP/khadas-utils" checkout --detach a3604ed6d6863d1946d26d0ac8e765aef6f17430
+          packer="$RUNNER_TEMP/khadas-utils/aml-flash-tool/tools/linux-x86/aml_image_v2_packer"
+          echo "8123b1295abb3262c76b650ba024975e38aedfd49b19f59a09f5920738ef1597  $packer" | sha256sum --check
+          chmod +x "$packer"
+          file "$packer"
+          "$packer" -c "$RUNNER_TEMP/reference/W103D_Armbian_26.8.1_Server.img"
+          echo "AMLPACKER=$packer" >> "$GITHUB_ENV"
+
+      - name: Assemble new boot and root partitions and pack the Amlogic IMG
+        run: |
+          set -euo pipefail
+          df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          available_kb=$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
+          if [ "$available_kb" -lt $((8 * 1024 * 1024)) ]; then
+            echo "Insufficient free workspace for sparse filesystem assembly: ${available_kb} KiB" >&2
+            exit 1
+          fi
+          report=$(find "$RUNNER_TEMP/system" -type f -name system-image-verification.json -print -quit)
+          image=$(find "$RUNNER_TEMP/system" -type f -name '*.img.gz' -print -quit)
+          manifest="$KERNEL_MANIFEST"
+          version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel_version"])' "$manifest")
+          mkdir -p outputs
+          sudo python3 scripts/assemble_usb_image.py \
+            --reference-dir "$RUNNER_TEMP/reference" \
+            --system-image "$image" --system-report "$report" \
+            --kernel-archive "$KERNEL_ARCHIVE" --kernel-manifest "$manifest" \
+            --sources-lock "$SOURCES_LOCK" --base-image-lock "$BASE_IMAGE_LOCK" \
+            --ophub-boot-emmc "$OPHUB_BOOT_EMMC" \
+            --packer "$AMLPACKER" --work "$RUNNER_TEMP/assemble" \
+            --output "outputs/W103D_Armbian_Trixie_Kernel-${version}_USB_Burning_Tool.img"
+          cp "$RUNNER_TEMP/assemble/assembly-input-report.json" outputs/assembly-input-report.json
+          cp config/reference.lock.json outputs/reference.lock.json
+          mkdir -p outputs/provenance
+          cp "$SOURCES_LOCK" outputs/provenance/sources.lock.json
+          cp "$KERNEL_MANIFEST" outputs/provenance/kernel-input-manifest.json
+          cp "$BASE_IMAGE_LOCK" outputs/provenance/base-image.lock.json
+          cp "$report" outputs/provenance/system-image-verification.json
+          cp "$RUNNER_TEMP/system-run.json" outputs/provenance/system-source-run.json
+          echo "SOURCES_LOCK=$GITHUB_WORKSPACE/outputs/provenance/sources.lock.json" >> "$GITHUB_ENV"
+          echo "KERNEL_MANIFEST=$GITHUB_WORKSPACE/outputs/provenance/kernel-input-manifest.json" >> "$GITHUB_ENV"
+          echo "BASE_IMAGE_LOCK=$GITHUB_WORKSPACE/outputs/provenance/base-image.lock.json" >> "$GITHUB_ENV"
+          sudo rm -rf "$RUNNER_TEMP/assemble" "$RUNNER_TEMP/reference" "$RUNNER_TEMP/system"
+          df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+
+      - name: Independently unpack and verify every final image payload
+        run: |
+          set -euo pipefail
+          image=$(find outputs -maxdepth 1 -type f -name '*USB_Burning_Tool.img' -print -quit)
+          sudo python3 scripts/verify_usb_image.py \
+            --image "$image" \
+            --assembly-report outputs/assembly-input-report.json \
+            --kernel-archive "$KERNEL_ARCHIVE" --kernel-manifest "$KERNEL_MANIFEST" \
+            --sources-lock "$SOURCES_LOCK" --base-image-lock "$BASE_IMAGE_LOCK" \
+            --reference-layout config/reference-layout-lock.json \
+            --packer "$AMLPACKER" --out outputs/verification-report.json
+          sha256sum "$image" > outputs/SHA256SUMS
+
+      - name: Upload the single raw USB Burning Tool IMG
+        if: success()
+        id: upload-image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-usb-burning-tool-image-${{ github.run_id }}
+          path: outputs/*USB_Burning_Tool.img
+          archive: false
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Re-download raw IMG artifact and verify exact bytes
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload-image.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          test -n "$ARTIFACT_ID"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > outputs/uploaded-artifact-metadata.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          artifact=json.load(open('outputs/uploaded-artifact-metadata.json'))
+          expected=next(Path('outputs').glob('*USB_Burning_Tool.img')).name
+          if artifact.get('id') != int(os.environ['ARTIFACT_ID']) or artifact.get('name') != expected or artifact.get('expired'):
+              raise SystemExit(f"raw IMG artifact metadata mismatch: {artifact}")
+          PY
+          mkdir -p "$RUNNER_TEMP/artifact-readback"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/artifact-readback/download.zip"
+          source=$(find outputs -maxdepth 1 -type f -name '*USB_Burning_Tool.img' -print -quit)
+          python3 - <<'PY'
+          import os, shutil, zipfile
+          from pathlib import Path
+          archive=Path(os.environ['RUNNER_TEMP'])/'artifact-readback/download.zip'
+          target=Path(os.environ['RUNNER_TEMP'])/'artifact-readback/files'
+          target.mkdir()
+          if zipfile.is_zipfile(archive):
+              with zipfile.ZipFile(archive) as zf:
+                  names=[n for n in zf.namelist() if n.endswith('.img') and not n.endswith('/')]
+                  if len(names)!=1: raise SystemExit(f"artifact archive does not contain exactly one IMG: {names}")
+                  with zf.open(names[0]) as src, (target/Path(names[0]).name).open('wb') as dst: shutil.copyfileobj(src,dst)
+          else:
+              shutil.copyfile(archive,target/next(Path('outputs').glob('*USB_Burning_Tool.img')).name)
+          PY
+          downloaded=$(find "$RUNNER_TEMP/artifact-readback/files" -type f -name '*.img' -print -quit)
+          test "$(find "$RUNNER_TEMP/artifact-readback/files" -type f -name '*.img' | wc -l)" -eq 1
+          test -n "$downloaded"
+          test "$(sha256sum "$source" | cut -d' ' -f1)" = "$(sha256sum "$downloaded" | cut -d' ' -f1)"
+          test "$(stat -c '%s' "$source")" = "$(stat -c '%s' "$downloaded")"
+          cp outputs/SHA256SUMS outputs/artifact-download-validation.txt
+          printf 'artifact_id=%s\nartifact_name=%s\nbytes=%s\nsha256=%s\n' \
+            "$ARTIFACT_ID" "$(basename "$source")" \
+            "$(stat -c '%s' "$downloaded")" \
+            "$(sha256sum "$downloaded" | cut -d' ' -f1)" >> outputs/artifact-download-validation.txt
+
+      - name: Upload verification reports separately
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-usb-burning-tool-verification-${{ github.run_id }}
+          path: |
+            outputs/assembly-input-report.json
+            outputs/verification-report.json
+            outputs/SHA256SUMS
+            outputs/reference.lock.json
+            outputs/provenance/**
+            outputs/artifact-download-validation.txt
+            outputs/uploaded-artifact-metadata.json
+          if-no-files-found: warn
+          retention-days: 90

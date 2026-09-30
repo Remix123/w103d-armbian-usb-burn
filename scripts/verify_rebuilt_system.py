@@ -6,7 +6,6 @@ import argparse
 import gzip
 import hashlib
 import json
-import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -74,6 +73,18 @@ def find_exact_mount_path(mounts: list[Path], relpaths: list[Path], label: str) 
     return found[0]
 
 
+def gunzip_sparse(source: Path, target: Path) -> int:
+    logical = 0
+    with gzip.open(source, "rb") as inp, target.open("xb") as out:
+        while block := inp.read(8 << 20):
+            if any(block):
+                out.seek(logical)
+                out.write(block)
+            logical += len(block)
+        out.truncate(logical)
+    return logical
+
+
 def module_relative_path(member_name: str, release: str) -> Path:
     parts = PurePosixPath(member_name).parts
     relative_parts = None
@@ -128,8 +139,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="w103d-system-check-") as td:
         temp = Path(td)
         disk = temp / "system.img"
-        with gzip.open(image, "rb") as source, disk.open("wb") as target:
-            shutil.copyfileobj(source, target, length=4 * 1024 * 1024)
+        gunzip_sparse(image, disk)
         args.output_dir.mkdir(parents=True, exist_ok=True)
         loop = run("sudo", "losetup", "--find", "--show", "--partscan", str(disk))
         mounts: list[Path] = []
