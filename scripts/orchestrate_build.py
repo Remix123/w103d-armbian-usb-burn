@@ -182,7 +182,8 @@ def main() -> None:
     image_sha, zip_sha = fields.get("image_sha256", ""), fields.get("zip_sha256", "")
     if not all((image_name, zip_name, re.fullmatch(r"[0-9a-f]{64}", image_sha), re.fullmatch(r"[0-9a-f]{64}", zip_sha))):
         raise ValueError(f"ZIP readback validation report is incomplete: {fields}")
-    if (zip_metadata.get("name") != zip_name or zip_name != image_name.removesuffix(".img") + ".zip"
+    image_versions = re.fullmatch(r"W103D_Armbian_(\d+\.\d+\.\d+)_(\d+\.\d+\.\d+)_USB_Burning_Tool\.img", image_name)
+    if not image_versions or (zip_metadata.get("name") != zip_name or zip_name != image_name.removesuffix(".img") + ".zip"
             or str(zip_metadata.get("size_in_bytes")) != fields.get("zip_bytes")
             or zip_metadata.get("digest") != f"sha256:{zip_sha}"):
         raise ValueError(f"ZIP metadata, versioned basename, size or digest differs from readback report: {zip_metadata} {fields}")

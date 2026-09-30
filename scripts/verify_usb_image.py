@@ -120,7 +120,7 @@ def main() -> int:
     if release != version + "-ophub" or assembly.get("kernel_release") != release:
         raise SystemExit("kernel release disagreement between source, assembly and final verification")
     armbian_version=assembly.get("armbian_version", "")
-    expected_name=f"W103D_Armbian_Trixie-{armbian_version}_Kernel-{version}_USB_Burning_Tool.img"
+    expected_name=f"W103D_Armbian_{armbian_version}_{version}_USB_Burning_Tool.img"
     if not armbian_version or image.name != expected_name:
         raise SystemExit(f"final IMG basename does not encode verified Armbian/kernel versions: expected {expected_name!r}, got {image.name!r}")
     verify_inner_checksums(a.kernel_archive, version)

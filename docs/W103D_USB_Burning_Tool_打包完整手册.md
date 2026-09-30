@@ -1,6 +1,6 @@
 # W103D Armbian USB Burning Tool 镜像构建与验收手册
 
-**适用对象：ZTE W103D / Amlogic S905L3A。** 本流程在 GitHub Actions/Linux runner 上完成内核编译、Trixie 系统重建、参考镜像解析、USB Burning Tool 镜像封装和离线回读。最终交付是一件可导入 Amlogic USB Burning Tool 的原始 `.img` 文件；普通 Armbian 磁盘镜像和 ZIP 都只是中间输入，不能充当最终产物。
+**适用对象：ZTE W103D / Amlogic S905L3A。** 固件解包、内核编译、Trixie 系统重建、USB Burning Tool 镜像封装、ZIP 压缩和回读验证均在 GitHub Actions/Linux runner 完成。常规用户只 dispatch 一个入口；编排器顺序创建多个独立子 workflow runs。最终下载件是单 ZIP，里面恰有一个可直接导入 USB Burning Tool 的 raw IMG、可用 `sha256sum -c` 验证的 `SHA256SUMS` 以及 provenance/验证报告。ZIP 本身不能导入烧录工具。
 
 本流程以 [ophub/amlogic-s9xxx-armbian](https://github.com/ophub/amlogic-s9xxx-armbian) 当前支持 W103D 的源代码和内核为系统来源。参考分支 [pigeon2049/amlogic-s9xxx-armbian/tree/w103d-burn-6.18](https://github.com/pigeon2049/amlogic-s9xxx-armbian/tree/w103d-burn-6.18) 仅用于理解板级 USB 烧录打包方法；不得从该分支替换系统或内核来源。
 
@@ -8,17 +8,19 @@
 
 ## 1. 当前执行状态
 
-仓库：[Remix123/w103d-armbian-usb-burn](https://github.com/Remix123/w103d-armbian-usb-burn)。本次最终打包使用代码提交 `025700e81035f16d70d3479aa90b9b917a04bbb9`。2026-09-30 已得到这些真实结果：
+仓库：[Remix123/w103d-armbian-usb-burn](https://github.com/Remix123/w103d-armbian-usb-burn)。截至 2026-09-30，已知运行与其适用范围如下：
 
 | 阶段 | GitHub run | 结果 |
 |---|---|---|
 | 参考包云端预检 | [36664112046](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36664112046) | 成功。ZIP/IMG 哈希、容器和参考布局解析通过 |
 | 内核构建 | [36669269184](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36669269184) | 内核已编译成功；最初仅因验证 step 缺 `rg` 退出失败 |
 | 已编译内核恢复校验 | [36680464101](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36680464101) | 成功；复核既有 artifact，没有重新编译 |
-| Trixie 系统重建 | [36683231196](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36683231196) | 成功；系统内核、DTB、modules 与锁定内核产物逐字节比对通过 |
-| USB Burning Tool 组装 | [36686786094](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36686786094) | 成功；GitHub 真实 mkimage parser 测试、Amlogic pack、独立回读及 artifact 下载 SHA 校验通过。产物为 artifact `11084660823`，1,717,797,104 bytes，SHA-256 `6464978a0ccac8f5f228429a2a2860fc20c1203f1dfbbeeb295d10b243e35aec` |
+| 旧基础镜像系统重建 | [36683231196](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36683231196) | 当时成功，但使用错误选取的 Armbian archive Odroid N2 26.8.1 base；作为历史诊断，不符合“最新 Ophub 26.11.0 系统”目标 |
+| 旧版 USB 结构验证 | [36686786094](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36686786094) | 历史 packer/boot/rootfs 离线验证通过；输出名不含系统版本，不能当新目标最终交付 |
+| 旧 base 版本命名测试 | [36690877359](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36690877359) | 使用 26.8.1 系统的打包测试成功；不是最新系统目标，不能作为新版本 ZIP 来源 |
+| Ophub 最新系统轻量重建 | [36692133844](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36692133844) | 成功；锁定 Ophub official 26.11.0 generic Trixie base，根内 `/etc/armbian-release VERSION`、kernel、DTB、全部 modules 检查通过；复用既有 recovery kernel，不重编 |
 
-本次最终工作流已成功，raw IMG artifact 重新下载后的大小和 SHA-256 一致，故可报告“GitHub 离线打包和验证通过”。设备烧录、冷启动、在线升级仍是独立的硬件验收，尚未执行。
+一键入口测试 [36691126247](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36691126247) 已在预检后被取消：当时发现 base 来源选错。它没有完成内核、系统、USB 或 ZIP 阶段。26.11.0 system artifact 已成功；对应的新版名称 USB/ZIP run 尚未启动，故当前没有符合最新系统和命名要求的最终交付。历史 IMG 不能改名后冒充新版。所有硬件烧录、冷启动和在线升级仍未执行。
 
 ## 2. 镜像类型、布局与两级启动链
 
@@ -86,11 +88,15 @@ gh release upload reference-input-2026-09-30 W103D_Armbian_26.8.1_Server.zip \
 
 ### 3.2 上游代码、内核和工具锁
 
-`resolve_sources.py` 在编译 job 中查询 Ophub 的 W103D 设备记录、当前支持内核系列、内核配置与上游资产，再将解析结果固定到该次 `sources.lock.json`。后续 clone/checkout 使用锁中的 commit，而不是 `main`。`resolve_base_image.py` 选官方 Armbian archive 中的通用 Trixie minimal 基础镜像及其官方 SHA sidecar；该脚本生成的 `base-image.lock.json` 作为成功系统 artifact 保存，并随最终交付保留。生成逻辑见 [`resolve_base_image.py`](../scripts/resolve_base_image.py)。Ophub lock source commit 用于检出其 rebuild Action 和 `boot-emmc.cmd`。
+`resolve_sources.py` 查询 Ophub 主仓 [model_database.conf](https://github.com/ophub/amlogic-s9xxx-armbian/blob/main/build-armbian/armbian-files/common-files/etc/model_database.conf) 中唯一 enabled 的 W103D 行，并按其 `stable/X.Y.y` 字段动态确定 kernel series；不会在 resolver 中写死 `6.18`。当前行标识 `s905l3a-w103d`、DTB `meson-g12a-w103d.dtb`、U-Boot `u-boot-w103d.bin`、series `stable/6.18.y`。然后将 Ophub 主仓、`ophub/linux-X.Y.y` Kernel tree、`ophub/kernel` 配置 repo 和 toolchain asset 的 commit/hash 锁入 `sources.lock.json`。后续 clone/checkout 使用这些不可变 commit，而不是 floating `main`。官方 [Ophub compile-kernel workflow](https://github.com/ophub/amlogic-s9xxx-armbian/blob/main/.github/workflows/compile-kernel.yml) 的 `kernel_source=ophub` 路径也是先解析 `ophub/linux` 分仓，再调用主仓 kernel build helper；kernel tree 与配置库分仓是 Ophub 官方依赖关系，不是把 Pigeon fork 作为替代源码。
+
+官方 [Ophub kernel helper](https://github.com/ophub/amlogic-s9xxx-armbian/blob/main/compile-kernel/tools/script/armbian_compile_kernel.sh) 将内核配置定位到 `ophub/kernel` 的 `kernel-config/release`，GNU ARM toolchain 也从 `ophub/kernel` 的 `dev` release 获取。当前流程在锁中记录 config commit/path/hash 和 Ophub `arm-gnu-toolchain-15.3.rel1` asset SHA，固定工具链用于复现，不随着每次重跑浮动变更。系统 rebuild Action、W103D board profile 与 `boot-emmc.cmd` 来自锁定的 `ophub/amlogic-s9xxx-armbian` 主仓 commit。
+
+`resolve_base_image.py` 从 Ophub 官方 Releases 的 Trixie arm64 server releases 中选通用 `-trunk` `.img.gz`，先按 Armbian 版本数值排序、再按 asset `updated_at` 选择；胜出候选必须有 API SHA-256，不会在缺 hash 时悄悄退回旧版本。`base-image.lock.json` 保存 repository/release/asset ID/tag/name/size/digest/hash/API 与 browser URL/time/system version，并随 system artifact 和 ZIP provenance 保存。当前最新候选来自 `Armbian_trixie_arm64_server_2026.09`：asset `574482696`，`Armbian_26.11.0-trunk_trixie_arm64_6.18.52.img.gz`，847455217 bytes，SHA-256 `b639a9e071e1523a3b920e4754414af3c720f12a19df221841c2372a4f7139b0`。system run [36692133844](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36692133844) 已成功并报告 `/etc/armbian-release VERSION=26.11.0`、kernel release `6.18.54-ophub`。base 所带 `6.18.52` 是通用镜像构建标签；我们交付的 W103D kernel 是独立由最新 enabled W103D series 编译并强制比较安装文件的 `6.18.54`。
 
 当前已成功系统 run 对应的锁值是 build artifact 的权威记录。该次决策使用 Ophub `8b601ee74525a5cc68661d372c613666b9fafddd`，kernel tree `ophub/linux-6.18.y` commit `0f189d6b3197b94a8fbc96a670f0095cd63ce1a9`，kernel config metadata commit `4dbcaf0f83d63bdf4efd343a3af922b2866408f2`，版本 `6.18.54`、release `6.18.54-ophub`。下次构建需以新 run 的 sources lock 为准，不把此版本写死为“最新”。
 
-Amlogic packer 在 [toolchain.lock.json](../config/toolchain.lock.json) 中固定：Khadas `utils` commit `a3604ed6d6863d1946d26d0ac8e765aef6f17430`，`aml_image_v2_packer` SHA-256 `8123b1295abb3262c76b650ba024975e38aedfd49b19f59a09f5920738ef1597`。它是静态 ELF32 i386，需 GitHub x86_64 Linux runner 的 IA32 执行支持。USB job 的真实 packer `-c`、`-d`、`-r` 结果由 run 日志证实；本地 macOS 不运行该工具。
+Amlogic packer 在 [toolchain.lock.json](../config/toolchain.lock.json) 中固定：Khadas `utils` commit `a3604ed6d6863d1946d26d0ac8e765aef6f17430`，`aml_image_v2_packer` SHA-256 `8123b1295abb3262c76b650ba024975e38aedfd49b19f59a09f5920738ef1597`。它是独立的 Amlogic 容器格式打包工具，不是系统或内核源码；需 GitHub x86_64 Linux runner 的 IA32 执行支持。Pigeon W103D burn 分支仅作打包流程参考。USB job 的真实 packer `-c`、`-d`、`-r` 结果由 GitHub run 日志证实；本地 macOS 不运行该工具。
 
 ### 3.3 目录和脚本职责
 
@@ -99,6 +105,9 @@ Amlogic packer 在 [toolchain.lock.json](../config/toolchain.lock.json) 中固�
 - `.github/workflows/recover-kernel-artifact.yml`：仅针对已编译成功、后续验证工具缺失的既有 run 做来源核验和 artifact 恢复，不会重编。
 - `.github/workflows/build-system.yml`：采用官方通用 Trixie base，经锁定 Ophub source Action 针对 W103D 重建，强制消费 kernel archive 并比较实际镜像内容。
 - `.github/workflows/build-usb-burn-image.yml`：检查成功 system run、取 source lock/base lock/kernel artifact/参考 ZIP，装配 Burning Tool IMG 并独立检查。
+- `.github/workflows/deliver-zipped-image.yml`：按 USB run 与 artifact ID 下载已验证 IMG，核对 provenance/hash，创建单 ZIP，检查 CRC、唯一 IMG、内部 SHA256SUMS、外部 `.sha256`，并对上传后的 ZIP artifact 做回读。
+- `.github/workflows/build-and-deliver.yml`：唯一常规入口，固定 source commit/tag 后串行调度前述 stages，并等待精确关联的 child run。失败/取消时只清理本入口创建的活动子 run；状态报告上传不含凭证。
+- `scripts/orchestrate_build.py`、`scripts/cleanup_pipeline.py`、`scripts/export_pipeline_state.py`：唯一 run 关联、总超时、精确取消和简化 provenance 导出。
 - `scripts/validate_reference_zip.py`：安全校验并在 Actions 临时目录解 ZIP。
 - `scripts/prepare_kernel_input.py`、`scripts/create_kernel_manifest.py`、`scripts/recover_kernel_artifact.py`：提取、核验 kernel build archive 和 provenance。
 - `scripts/assemble_usb_image.py`：组合 FAT/ext4 和保留厂商组件；仅由 GitHub Ubuntu runner 用 `sudo python3` 执行。
@@ -106,7 +115,16 @@ Amlogic packer 在 [toolchain.lock.json](../config/toolchain.lock.json) 中固�
 
 ## 4. GitHub Actions 操作顺序
 
-仓库默认分支 `main`。使用 Actions 页面 **Run workflow** 手动启动；必须选正确分支，记录 run URL。不要从本地下载 IMG 后解包或构建，也不要用本地 Actions runner 替代云端镜像处理。
+仓库默认分支 `main`。常规构建只用 Actions 页面唯一入口 **Build and deliver W103D USB image**，两个恢复字段留空后按 **Run workflow**。入口会先固定代码 tag/commit，再按顺序创建参考预检、内核编译、系统重建、USB 组装/独立验证、ZIP 交付五个独立子 runs。每个子 run 按 workflow path、head SHA、tag 和唯一 correlation token 关联；编排器只向下一阶段传递已确认成功的 run ID，拒绝“latest run”猜测，任何失败立即停止。最终入口 summary 提供 ZIP、`.sha256` sidecar、内部 IMG 和校验 hash 的直链。用户只 dispatch 一次，但 Actions 中会看到入口和多个 child runs。
+
+取消入口时，cleanup 根据 dispatch 前写入的 stage、workflow、tag、token、commit 和参数查找精确 child，即使 GitHub 已接受 dispatch 但 run ID 尚未保存也能定位。仅取消此入口的活动子 run；取消 API 错误或 child 未终止会报告失败，不删除 source tag，tag 留作 provenance。
+
+唯一入口有两个数字型恢复参数，互斥：
+
+- `reuse_system_run_id`：从已成功系统 run 继续做版本命名 USB IMG、独立回读和 ZIP 交付。该 system artifact 必须未过期、包含确切 kernel archive 和完整来源锁。
+- `reuse_usb_run_id`：从成功 USB IMG run 只做 ZIP。run 必须有通过验证的新格式 IMG basename、SHA 和全部来源报告；旧命名 run 会拒绝。
+
+二者均空表示默认完整源码链；不能输入 artifact ID、branch 名或 shell 字符。用户需要排障时可以在 Actions 中单独运行各 child workflow，但它们不是常规入口。所有镜像操作都留在 GitHub，不通过本地 runner。
 
 ### 4.1 参考输入预检
 
@@ -135,11 +153,11 @@ Recovery 会验证原 run workflow path、commit、关键 step 状态、nested a
 
 - `kernel_run_id`: 成功的 `compile-kernel` run ID，或已审查成功的 recovery run ID
 
-工作流会严格识别来源 workflow path/name，下载其中唯一的 sources lock、kernel manifest 和 `${version}.tar.gz`，用 archive SHA 校验后发布到 `kernel_stable` Release。发布时先检查并串行化同版本资产，再在官方 Armbian archive 中解析通用 Odroid N2 Trixie minimal base 及 SHA sidecar。之后以锁定 Ophub Action 和 board `s905l3a-w103d` 重建系统，关闭自动替换 kernel；检查唯一符合名称的 Trixie W103D Server/minimal 输出、`/etc/os-release`、`/etc/ophub-release`、kernel、Linux DTB、完整 modules 内容。不能取到别的 board/series 的同版本 `.img.gz`。
+工作流会严格识别来源 workflow path/name，下载其中唯一的 sources lock、kernel manifest 和 `${version}.tar.gz`，用 archive SHA 校验后发布到 `kernel_stable` Release。发布时先检查并串行化同版本资产，再用 GitHub API 查询 Ophub 官方 Trixie arm64 server Releases，锁定最新通用 `-trunk` `.img.gz` 并按 API SHA-256 校验下载。之后以锁定 Ophub Action 和 board `s905l3a-w103d` 重建系统，关闭自动替换 kernel；验证器检查唯一符合 W103D/Trixie/kernel release 的 `.img.gz`、`/etc/os-release`、`/etc/ophub-release`、完整 kernel/DTB/modules 内容，并要求根内 `/etc/armbian-release VERSION` 与 base lock 的实际版本一致。Ophub release 自带 kernel track 只描述通用 base；最终 W103D kernel 版本以独立编译的 manifest 为准。
 
 成功 system artifact 名为 `w103d-rebuilt-system-<run_id>`，包含压缩磁盘镜像、`system-image-verification.json`、`base-image.lock.json`、`sources.lock.json`、kernel manifest 和 Ophub commit。另有 diagnostics 和 candidate artifacts；失败时 candidate 只是未验收输入，不能交付。
 
-本次系统成功 run 为 [36683231196](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36683231196)。它给 USB workflow 提供可校验的 `.img.gz` 和 manifest。
+历史错误 base 系统 run [36683231196](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36683231196) 不应用于最终 USB/ZIP。Ophub 新 base 系统 run [36692133844](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36692133844) 已成功：它复用 kernel recovery run `36680464101`，从官方 26.11.0 generic Trixie release 重建 W103D，根内版本为 `26.11.0`，kernel release 是 `6.18.54-ophub`。该 system artifact 才是新版 USB 的输入。
 
 ### 4.4 生成 USB Burning Tool 单文件 IMG
 
@@ -147,7 +165,16 @@ Recovery 会验证原 run workflow path、commit、关键 step 状态、nested a
 
 - `system_run_id`: 上一步成功系统重建的 run ID
 
-此工作流拒绝非成功的系统 run，也校验 path/name、image report 和 kernel manifest/source lock 一致。它重新下载参考 ZIP、system artifact、kernel Release archive 及对应 Ophub boot-script source；在 runner 使用 `mkfs.fat`/mtools、e2fsprogs、`unmkinitramfs`、`mkimage` 和锁定 Amlogic packer。
+此工作流拒绝非成功的系统 run，也校验 path/name、实际根内 `VERSION`、system report、base/source locks 与 kernel manifest 一致。它重新下载参考 ZIP、system artifact 中该次实际消费的不可变 kernel archive 及对应 Ophub boot-script source；在 runner 使用 `mkfs.fat`/mtools、e2fsprogs、`unmkinitramfs`、`mkimage` 和锁定 Amlogic packer。IMG basename 固定为 `W103D_Armbian_{armbian_version}_{kernel_version}_USB_Burning_Tool.img`，例如 `W103D_Armbian_26.11.0_6.18.54_USB_Burning_Tool.img`。值来自根内 `/etc/armbian-release VERSION` 和已验证 kernel manifest，不从 base 文件名推断。
+
+常规用户只需运行唯一入口：
+
+```sh
+gh workflow run "Build and deliver W103D USB image" \
+  --repo Remix123/w103d-armbian-usb-burn --ref main
+```
+
+默认两个恢复输入都为空，入口固定 source commit/tag，串行执行预检、内核、系统、USB、ZIP 五阶段并等待每个子 run 成功。手动单阶段命令只用于诊断，不能混用不同 run 的锁或 artifacts。
 
 完整手动调度示例（run ID 要换成对应成功 run 的 ID）：
 
@@ -179,15 +206,15 @@ Recovery ID 必须等该 recovery run 成功后再传给 system build。以上�
 4. 改 rootfs `/etc/fstab`、Ophub `DISK_TYPE=emmc`、禁用冲突 resize link、安装 W103D 专用首次扩容 service；清除 machine-id 和 SSH host keys，首启再生成。
 5. 保留参考容器的厂商 payload，逐项 SHA-256 核对。使用 packer 重新组装最终 Amlogic image；pack 之后独立 verifier 再次解包，核对 image.cfg、每个 vendor component、整个 sparse 文件系统回读、FAT 文件内容、ext4 回读和 boot script CRC/body。执行真实打包之前，Ubuntu runner 还会运行 `mkimage` 合成脚本测试，覆盖 1/2/3/4-byte script body 长度和尾随字节拒绝。
 6. 比对所有 archive 内 W103D kernel/DTB/modules 与最终 FAT/rootfs；对完整 initramfs 使用 `unmkinitramfs` 提取所有 cpio 部分，再按压缩格式规范化模块字节后与最终 `/lib/modules/<release>` 比较。
-7. 只在上述验证全部通过时上传一个 `.img` 文件。上传后按 artifact ID 查询真实 metadata，以 IMG basename 校验；从 GitHub artifact download 接口读取，再判断响应是 raw bytes 还是 ZIP 包并提取唯一 IMG，核对下载副本 SHA-256 和 size 与原始 IMG 一致。
+7. 只在上述验证全部通过时上传一个 raw `.img` 中间 artifact。上传后按 artifact ID 查询真实 metadata，以 IMG basename 校验；从 GitHub artifact download 接口读取，再判断响应是 raw bytes 还是 ZIP 包并提取唯一 IMG，核对下载副本 SHA-256 和 size 与原始 IMG 一致。随后 ZIP workflow 才生成最终用户下载件。
 
-本次成功 USB run：[36686786094](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36686786094)，head commit `025700e81035f16d70d3479aa90b9b917a04bbb9`。GitHub runner 上真实 `mkimage` 的 1/2/3/4-byte script 测试、镜像装配、独立回读、raw IMG 上传和下载 bytes/SHA-256 校验均通过。最终 artifact ID `11084660823`，字节数 `1717797104`，SHA-256 `6464978a0ccac8f5f228429a2a2860fc20c1203f1dfbbeeb295d10b243e35aec`。验证报告统计 245 个 FAT regular files、3156 个 rootfs modules、538 个 initramfs modules 均通过；离线验证已通过，但未在实体 W103D 烧录或启动。
+历史 USB run [36686786094](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36686786094) 在错误的 26.8.1 base 上通过旧命名结构测试；artifact `11084660823` 未编码两个版本字段，不能当作新目标交付。新版 USB/ZIP 还未构建。
 
 ### 4.5 最终下载位置和 SHA 核对
 
-Actions 成功后，在相应 run 的 **Artifacts** 下载 artifact。`archive: false` 请求单文件 raw 模式；以 artifact metadata 和最终 `artifact-download-validation.txt` 为准。因为服务端可能按文件 basename 命名，不要只看 YAML 的 `name:` 字符串。报告中至少应记录：artifact ID、实际 basename、byte size、SHA-256、source system/kernel/reference/base locks、最终 verifier JSON。本次成功成品为 artifact `11084660823`，文件 `W103D_Armbian_Trixie_Kernel-6.18.54_USB_Burning_Tool.img`，1,717,797,104 bytes，SHA-256 `6464978a0ccac8f5f228429a2a2860fc20c1203f1dfbbeeb295d10b243e35aec`；下载校验报告和 provenance 在 [本次 run](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36686786094) 的 `w103d-usb-burning-tool-verification-36686786094` artifact 中。
+ZIP delivery run 会按 USB artifact ID 下载 raw IMG，并对来源 run、校验报告、实际 basename、size/SHA 与完整 provenance 逐项核验。它创建 `W103D_Armbian_{armbian_version}_{kernel_version}_USB_Burning_Tool.zip`，包内只有一个对应 `.img`、根目录 `SHA256SUMS`、provenance 和验证报告；检查每个 ZIP member CRC、内部 SHA256SUMS 和唯一 IMG，然后上传 raw ZIP artifact 及独立 `<zip>.sha256` sidecar。入口 summary 提供 ZIP 和 sidecar 直链。当前 26.11.0 新格式 ZIP 尚未构建；完成后在此补入 run/artifact ID、大小和哈希。
 
-目标为一件完整 `.img`，不是下载 artifact ZIP 本身。若 GitHub artifact 的真实结果仍被压缩成下载 ZIP，只能把 ZIP 当 HTTP/API 下载封装，内部必须恰有那一个原始 IMG；必须将 IMG 字节比对通过后，才能给出最终 `.img`。不得让用户手工拼接多个分卷，不得把 verification report 当作镜像。
+最终用户交付是一个版本化 ZIP，不是 GitHub artifact API 的传输 wrapper。下载后先校验外部 sidecar，再检查 ZIP CRC 和包内 `SHA256SUMS`；其根目录包含且只包含一个版本命名 IMG、manifest 和报告。不要手工拼接分卷，也不要将普通 Ophub `.img.gz` 或 system artifact 当成可直接烧录产物。
 
 ## 5. 系统与厂商分区的具体修改
 
@@ -229,13 +256,14 @@ boot FAT 从 Ophub 重建镜像的完整 `/boot` 文件集合开始，随后覆�
 
 ### 6.1 GitHub 成品验收门槛
 
-只有在 USB workflow 全绿并且 artifact 回读通过，才归档以下文件：
+只有在 USB verifier 与 ZIP workflow 全绿、ZIP 按 artifact ID 重新下载并完整回读通过，才把该包当成最终交付：
 
-- 单个 `W103D_Armbian_Trixie_Kernel-<version>_USB_Burning_Tool.img`；
-- `SHA256SUMS` 和 `artifact-download-validation.txt`；
-- `verification-report.json`、`assembly-input-report.json`；
-- `reference.lock.json`、`sources.lock.json`、`kernel-input-manifest.json`、`base-image.lock.json`、`system-image-verification.json`、原 system run JSON；
-- Actions run URL、commit ID、实际 artifact ID 和成功结论。
+- 单个 `W103D_Armbian_<实际系统版本>_<内核版本>_USB_Burning_Tool.zip`；
+- ZIP 根目录唯一 raw IMG `W103D_Armbian_<实际系统版本>_<内核版本>_USB_Burning_Tool.img` 与能直接用于 `sha256sum -c` 的 `SHA256SUMS`；
+- 外部 `<zip basename>.sha256` sidecar，以及 `zip-delivery-validation.txt`、ZIP CRC/内 SHA 读回报告；
+- `verification-report.json`、`assembly-input-report.json`、`artifact-download-validation.txt`；
+- `reference.lock.json`、`sources.lock.json`、`kernel-input-manifest.json`、`base-image.lock.json`、`system-image-verification.json`、kernel recovery/source run provenance；
+- Actions run URL、固定 source commit/tag、IMG/ZIP artifact ID、size、SHA-256 和成功结论。
 
 验证必须涵盖：Amlogic 容器 decode/check；vendor payload hash；`image.cfg` 与容器项目检查；sparse header fields/chunk/image CRC/trailing EOF；FAT `fsck.vfat -n` 和全部 boot 文件回读；ext4 `e2fsck -fn`/label/read-only mount；Trixie `os-release`、Ophub `DISK_TYPE=emmc`、fstab、machine-id、D-Bus link、SSH key 清理、resize service；主线 boot-emmc 与 vendor fallback 的 U-Boot legacy CRC及源码映射；kernel config、kernel/DTB 所有字节、rootfs全部模块、initramfs全部模块；最终 artifact 重新下载后 bytes+SHA256。这里的 container/image.cfg 检查不等于验证设备 MBR 或 eMMC 起始偏移。
 
@@ -245,15 +273,27 @@ boot FAT 从 Ophub 重建镜像的完整 `/boot` 文件集合开始，随后覆�
 
 Windows 只承担最后的用户侧导入和烧录，不参与编译、镜像挂载、解包、系统修改、重打包或验证。建议顺序：
 
-1. 从成功的 USB workflow artifact 取得唯一原始 `.img`，另取 `SHA256SUMS`/下载校验报告；不要对镜像 artifact 手工重命名后再混淆来源。
-2. 用 PowerShell 校验下载文件（把哈希替换成实际 Actions 报告值）：
+1. 从成功的 one-click run summary 下载 ZIP artifact 和同一 run 的 `.sha256` sidecar；不要下载普通 Armbian `.img.gz` 或旧的 USB raw artifact 作为最终件。
+2. 用 PowerShell 校验 ZIP 外部 hash、解压后对 IMG 和 provenance 运行包内 SHA256SUMS：
 
    ```powershell
-   Get-FileHash .\W103D_Armbian_Trixie_Kernel-6.18.54_USB_Burning_Tool.img -Algorithm SHA256
+   $zip = ".\W103D_Armbian_26.11.0_6.18.54_USB_Burning_Tool.zip"
+   $sidecar = Get-Content "${zip}.sha256"
+   $expected = ($sidecar -split '\s+')[0]
+   $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+   if ($actual -ne $expected) { throw "ZIP SHA-256 mismatch" }
+   Expand-Archive -LiteralPath $zip -DestinationPath .\w103d-package
+   Get-Content .\w103d-package\SHA256SUMS | ForEach-Object {
+       $expected = $_.Substring(0, 64)
+       $file = Join-Path .\w103d-package ($_.Substring(66))
+       $actual = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+       if ($actual -ne $expected) { throw "SHA-256 mismatch: $file" }
+   }
+   Get-FileHash .\w103d-package\W103D_Armbian_26.11.0_6.18.54_USB_Burning_Tool.img -Algorithm SHA256
    ```
 
 3. 保留原始可恢复参考包及其 SHA256；确认 USB 驱动、设备进入下载模式方式、供电和线缆。准备串口与已验证恢复手段。
-4. 在与该盒子相匹配的 Amlogic USB Burning Tool 中导入最终 IMG，记录工具版本、导入结果和 log。不要导入 `.img.gz`、普通 Ophub 磁盘镜像、ZIP 或 artifact reports。
+4. 在与该盒子相匹配的 Amlogic USB Burning Tool 中导入从 ZIP 解出的版本命名 IMG，记录工具版本、导入结果和 log。不要导入 `.img.gz`、普通 Ophub 磁盘镜像、ZIP 本身或 artifact reports。
 5. 烧录选项沿用该 W103D 的已验证操作流程。本项目没有验证擦除模式、密钥擦除或全盘擦除的通用设置，不能猜测一个适用于所有盒子的选项。
 6. 成功提示只表示烧录工具流程到达完成。通过 UART 记录 DDR/U-Boot、厂商脚本、二级 U-Boot、Linux、root mount 和首次扩容；完成冷启动、重启及断电启动测试后，再检查网络、存储、无线、温度和外设。
 

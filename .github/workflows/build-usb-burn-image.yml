@@ -196,7 +196,7 @@ jobs:
             --sources-lock "$SOURCES_LOCK" --base-image-lock "$BASE_IMAGE_LOCK" \
             --ophub-boot-emmc "$OPHUB_BOOT_EMMC" \
             --packer "$AMLPACKER" --work "$RUNNER_TEMP/assemble" \
-            --output "outputs/W103D_Armbian_Trixie-{armbian_version}_Kernel-${version}_USB_Burning_Tool.img"
+            --output "outputs/W103D_Armbian_{armbian_version}_{kernel_version}_USB_Burning_Tool.img"
           cp "$RUNNER_TEMP/assemble/assembly-input-report.json" outputs/assembly-input-report.json
           cp config/reference.lock.json outputs/reference.lock.json
           mkdir -p outputs/provenance

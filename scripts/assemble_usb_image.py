@@ -185,8 +185,8 @@ def main() -> int:
         if not p.exists():
             raise SystemExit(f"required input does not exist: {p}")
     output_template = a.output.as_posix()
-    if "{armbian_version}" not in output_template or a.work.exists():
-        raise SystemExit("work must be new and output path must contain the {armbian_version} placeholder")
+    if "{armbian_version}" not in output_template or "{kernel_version}" not in output_template or a.work.exists():
+        raise SystemExit("work must be new and output path must contain both version placeholders")
     a.work.mkdir(parents=True)
     checks = a.work / "checks"
     checks.mkdir()
@@ -244,7 +244,7 @@ def main() -> int:
     armbian_version=armbian_fields.get("VERSION", "")
     if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", armbian_version):
         raise SystemExit(f"system /etc/armbian-release VERSION is invalid: {armbian_fields}")
-    a.output = Path(output_template.replace("{armbian_version}", armbian_version))
+    a.output = Path(output_template.replace("{armbian_version}", armbian_version).replace("{kernel_version}", version))
     if a.output.exists():
         raise SystemExit(f"versioned output already exists: {a.output}")
     if system_report.get("armbian_version") not in (None, armbian_version):
