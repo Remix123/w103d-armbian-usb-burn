@@ -112,14 +112,16 @@ jobs:
           gh release download kernel_stable --repo "$GITHUB_REPOSITORY" --pattern "${VERSION}.tar.gz" --dir "$RUNNER_TEMP/release-check"
           echo "$(sha256sum "$RUNNER_TEMP/kernel-input/${VERSION}.tar.gz" | cut -d' ' -f1)  $RUNNER_TEMP/release-check/${VERSION}.tar.gz" | sha256sum --check
 
-      - name: Resolve latest official Trixie base image and checksum
+      - name: Resolve latest generic Trixie arm64 server image from Ophub releases
         id: base
         env:
+          GH_TOKEN: ${{ github.token }}
           BASE_IMAGE_LOCK_OUT: ${{ runner.temp }}/base-image.lock.json
         run: python3 scripts/resolve_base_image.py
 
-      - name: Download and verify the official generic Trixie base image
+      - name: Download the exact Ophub release asset and verify its API digest
         env:
+          GH_TOKEN: ${{ github.token }}
           BASE_URL: ${{ steps.base.outputs.url }}
           BASE_SHA256: ${{ steps.base.outputs.sha256 }}
           BASE_FILENAME: ${{ steps.base.outputs.filename }}
@@ -127,6 +129,8 @@ jobs:
           set -euo pipefail
           curl --fail --location --retry 2 --retry-all-errors --connect-timeout 30 \
             --max-time 2400 --speed-limit 1024 --speed-time 120 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
             "$BASE_URL" -o "$RUNNER_TEMP/$BASE_FILENAME"
           echo "$BASE_SHA256  $RUNNER_TEMP/$BASE_FILENAME" | sha256sum --check
 
@@ -179,6 +183,7 @@ jobs:
             --kernel-archive "$RUNNER_TEMP/kernel-input/${KERNEL_VERSION}.tar.gz" \
             --kernel-manifest "$RUNNER_TEMP/kernel-input/kernel-packages.json" \
             --kernel-version "$KERNEL_VERSION" \
+            --base-image-lock "$RUNNER_TEMP/base-image.lock.json" \
             --dtb-name meson-g12a-w103d.dtb \
             --output-dir outputs/system
           cp "$RUNNER_TEMP/base-image.lock.json" outputs/system/

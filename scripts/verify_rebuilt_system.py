@@ -104,11 +104,18 @@ def main() -> int:
     parser.add_argument("--images-dir", type=Path, required=True)
     parser.add_argument("--kernel-archive", type=Path, required=True)
     parser.add_argument("--kernel-manifest", type=Path, required=True)
+    parser.add_argument("--base-image-lock", type=Path, required=True)
     parser.add_argument("--kernel-version", required=True)
     parser.add_argument("--dtb-name", default="meson-g12a-w103d.dtb")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     version = args.kernel_version
+    base_lock = json.loads(args.base_image_lock.read_text())
+    expected_armbian_version = base_lock.get("armbian_version", "")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", expected_armbian_version):
+        raise SystemExit(f"base image lock has no strict Armbian release version: {base_lock}")
+    if base_lock.get("repository") != "ophub/amlogic-s9xxx-armbian" or not base_lock.get("asset_id") or not base_lock.get("asset_digest"):
+        raise SystemExit(f"base image lock is not an immutable official Ophub release asset: {base_lock}")
     package_manifest = json.loads(args.kernel_manifest.read_text())
     release = package_manifest.get("kernel_release", "")
     if release != f"{version}-ophub":
@@ -188,6 +195,8 @@ def main() -> int:
             armbian_version = armbian_fields.get("VERSION", "")
             if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", armbian_version):
                 raise SystemExit(f"/etc/armbian-release has no supported numeric VERSION: {armbian_fields}")
+            if armbian_version != expected_armbian_version:
+                raise SystemExit(f"rebuilt /etc/armbian-release VERSION {armbian_version} differs from locked Ophub base release {expected_armbian_version}")
             ophub_release = find_exact_mount_path(mounts, [Path("etc/ophub-release")], "/etc/ophub-release")
             ophub_fields = parse_kv(ophub_release)
             board_values = " ".join(v for k, v in ophub_fields.items() if "BOARD" in k).lower()
@@ -241,6 +250,7 @@ def main() -> int:
                 "kernel_release": release,
                 "armbian_version": armbian_version,
                 "armbian_release": armbian_fields,
+                "base_image": {key: base_lock[key] for key in ("repository", "release_tag", "release_id", "asset_id", "filename", "asset_size", "asset_digest", "sha256", "armbian_version")},
                 "os_release": os_fields,
                 "ophub_release": ophub_fields,
                 "kernel_archives": {"boot": boot_archive_name, "dtb": dtb_archive_name, "modules": modules_archive_name},
