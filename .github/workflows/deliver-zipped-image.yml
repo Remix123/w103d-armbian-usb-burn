@@ -117,6 +117,7 @@ jobs:
               'hardware_boot_tested':False
           },indent=2)+'\n')
           PY
+          mkdir -p outputs/delivery
           zip_name="${IMAGE_NAME%.img}.zip"
           python3 scripts/deliver_image_zip.py package \
             --image "outputs/input/$IMAGE_NAME" \
@@ -126,7 +127,6 @@ jobs:
           printf '%s\n' "$zip_name" > outputs/delivery/zip-basename.txt
           echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
           echo "zip_basename=$zip_name" >> "$GITHUB_OUTPUT"
-          sha256sum "outputs/delivery/$zip_name" > "outputs/delivery/$zip_name.sha256"
           cp "outputs/delivery/$zip_name.sha256" outputs/delivery/zip-external.sha256
           cat outputs/delivery/zip-verification.json
 
@@ -163,7 +163,7 @@ jobs:
           python3 - <<'PY'
           import json, os
           m=json.load(open('outputs/delivery/uploaded-zip-artifact-metadata.json'))
-          if m.get('id')!=int(os.environ['ZIP_ARTIFACT_ID']) or m.get('name')!=os.environ['IMAGE_NAME']+'.zip' or m.get('expired'):
+          if m.get('id')!=int(os.environ['ZIP_ARTIFACT_ID']) or m.get('name')!=os.environ['ZIP_NAME'] or m.get('expired'):
               raise SystemExit(f"uploaded ZIP artifact metadata mismatch: {m}")
           PY
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ZIP_ARTIFACT_ID/zip" > "$RUNNER_TEMP/zip-artifact-transfer.bin"

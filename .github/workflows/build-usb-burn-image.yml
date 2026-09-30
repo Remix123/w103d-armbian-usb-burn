@@ -69,16 +69,41 @@ jobs:
           PY
 
       - name: Download and validate locked kernel archive
+        id: kernel-archive
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           manifest=$(find "$RUNNER_TEMP/system" -type f -name kernel-input-manifest.json -print -quit)
           version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel_version"])' "$manifest")
-          mkdir -p "$RUNNER_TEMP/kernel"
-          gh release download kernel_stable --repo "$GITHUB_REPOSITORY" --pattern "${version}.tar.gz" --dir "$RUNNER_TEMP/kernel"
-          archive="$RUNNER_TEMP/kernel/${version}.tar.gz"
+          kernel_run=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel_run_id"])' "$manifest")
           expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive_sha256"])' "$manifest")
+          [[ "$kernel_run" =~ ^[0-9]+$ ]]
+          archive_candidates=$(find "$RUNNER_TEMP/system" -type f -name "${version}.tar.gz" -print)
+          archive_count=$(printf '%s\n' "$archive_candidates" | sed '/^$/d' | wc -l)
+          if [ "$archive_count" -eq 1 ]; then
+            archive=$(printf '%s\n' "$archive_candidates")
+          elif [ "$archive_count" -eq 0 ]; then
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$kernel_run" > "$RUNNER_TEMP/kernel-source-run.json"
+            python3 - <<'PY'
+          import json, os
+          run=json.load(open(os.environ['RUNNER_TEMP']+'/kernel-source-run.json'))
+          expected={
+              '.github/workflows/compile-kernel.yml':('Compile pinned Ophub W103D kernel',f"w103d-kernel-build-{run.get('id')}"),
+              '.github/workflows/recover-kernel-artifact.yml':('Recover and verify existing W103D kernel artifact',f"w103d-kernel-recovery-{run.get('id')}")
+          }
+          if run.get('status')!='completed' or run.get('conclusion')!='success' or run.get('path') not in expected or run.get('name')!=expected[run['path']][0]:
+              raise SystemExit(f"kernel source run is not an approved successful immutable artifact: {run}")
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output: output.write(f"artifact_name={expected[run['path']][1]}\n")
+          PY
+            artifact_name=$(python3 -c 'import json,os; r=json.load(open(os.environ["RUNNER_TEMP"]+"/kernel-source-run.json")); print(("w103d-kernel-build-" if r["path"].endswith("compile-kernel.yml") else "w103d-kernel-recovery-")+str(r["id"]))')
+            gh run download "$kernel_run" --repo "$GITHUB_REPOSITORY" --name "$artifact_name" --dir "$RUNNER_TEMP/kernel-source-artifact"
+            python3 scripts/prepare_kernel_input.py --artifact-dir "$RUNNER_TEMP/kernel-source-artifact" --output-dir "$RUNNER_TEMP/kernel-exact" --run-id "$kernel_run"
+            archive="$RUNNER_TEMP/kernel-exact/${version}.tar.gz"
+          else
+            echo "system artifact contains multiple ${version}.tar.gz files" >&2
+            exit 1
+          fi
           echo "$expected  $archive" | sha256sum --check
           echo "KERNEL_ARCHIVE=$archive" >> "$GITHUB_ENV"
 

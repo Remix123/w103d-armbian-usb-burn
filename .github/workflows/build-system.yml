@@ -184,6 +184,7 @@ jobs:
           cp "$RUNNER_TEMP/base-image.lock.json" outputs/system/
           cp "$RUNNER_TEMP/kernel-input/sources.lock.json" outputs/system/
           cp "$RUNNER_TEMP/kernel-input/kernel-input-manifest.json" outputs/system/
+          cp "$RUNNER_TEMP/kernel-input/${KERNEL_VERSION}.tar.gz" outputs/system/
           printf '%s\n' "$OPHUB_SHA" > outputs/system/ophub-commit.txt
 
       - name: Capture build diagnostics

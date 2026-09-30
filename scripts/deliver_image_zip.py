@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import shutil
 import stat
 import zipfile
@@ -169,12 +170,12 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "package":
         archive = build_package(args.image, args.reports, args.out, args.zip_name)
-        print(verify_archive(archive))
+        print(json.dumps(verify_archive(archive), indent=2, sort_keys=True))
     elif args.command == "verify":
-        print(verify_archive(args.zip, args.expected_image, args.expected_image_sha256))
+        print(json.dumps(verify_archive(args.zip, args.expected_image, args.expected_image_sha256), indent=2, sort_keys=True))
     else:
         result = verify_artifact_download(args.transfer, args.out, args.expected_name, args.expected_zip_sha256, args.expected_image, args.expected_image_sha256)
-        print(verify_archive(result, args.expected_image, args.expected_image_sha256))
+        print(json.dumps(verify_archive(result, args.expected_image, args.expected_image_sha256), indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
