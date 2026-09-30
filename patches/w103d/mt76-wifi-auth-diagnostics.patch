@@ -1,0 +1,255 @@
+--- a/drivers/net/wireless/mediatek/mt76/mt7615/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7615/mac.c
+@@ -638,6 +638,26 @@
+ 		status->flag |= RX_FLAG_8023;
+ 	}
+ 
++	if (!hdr_trans && ieee80211_is_auth(fc)) {
++		if (skb->len >= offsetof(struct ieee80211_mgmt, u.auth.variable) &&
++		    skb_headlen(skb) >= offsetof(struct ieee80211_mgmt, u.auth.variable)) {
++			struct ieee80211_mgmt *mgmt = (void *)skb->data;
++
++			dev_info_ratelimited(dev->mt76.dev,
++				"W103D-DIAG rx_auth freq=%u band=%u len=%u rxd=%08x/%08x/%08x alg=%u seq=%u status=%u\n",
++				(unsigned int)status->freq, (unsigned int)status->band,
++				(unsigned int)skb->len, rxd0, rxd1, rxd2,
++				(unsigned int)le16_to_cpu(mgmt->u.auth.auth_alg),
++				(unsigned int)le16_to_cpu(mgmt->u.auth.auth_transaction),
++				(unsigned int)le16_to_cpu(mgmt->u.auth.status_code));
++		} else {
++			dev_info_ratelimited(dev->mt76.dev,
++				"W103D-DIAG rx_auth_short freq=%u band=%u len=%u rxd=%08x/%08x/%08x\n",
++				(unsigned int)status->freq, (unsigned int)status->band,
++				(unsigned int)skb->len, rxd0, rxd1, rxd2);
++		}
++	}
++
+ 	if (!status->wcid || !ieee80211_is_data_qos(fc))
+ 		return 0;
+ 
+@@ -745,6 +765,15 @@
+ 	fc_type = (le16_to_cpu(fc) & IEEE80211_FCTL_FTYPE) >> 2;
+ 	fc_stype = (le16_to_cpu(fc) & IEEE80211_FCTL_STYPE) >> 4;
+ 
++	if (skb->len >= sizeof(fc) && skb_headlen(skb) >= sizeof(fc) &&
++	    ieee80211_is_auth(fc))
++		dev_info_ratelimited(dev->mt76.dev,
++			"W103D-DIAG tx_prepare_auth wcid=%u pid=%d freq=%u band=%u requested_rate=%d/%d len=%u\n",
++			(unsigned int)wcid->idx, pid,
++			(unsigned int)(mphy->chandef.chan ? mphy->chandef.chan->center_freq : 0),
++			(unsigned int)(mphy->chandef.chan ? mphy->chandef.chan->band : 0),
++			rate->idx, rate->count, (unsigned int)skb->len);
++
+ 	if (beacon) {
+ 		p_fmt = MT_TX_TYPE_FW;
+ 		q_idx = phy_idx ? MT_LMAC_BCN1 : MT_LMAC_BCN0;
+@@ -1451,11 +1480,21 @@
+ 	skb = mt76_tx_status_skb_get(mdev, &sta->wcid, pid, &list);
+ 	if (skb) {
+ 		struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+-
+-		if (!mt7615_fill_txs(dev, sta, info, txs_data)) {
++		bool txs_valid;
++
++		txs_valid = mt7615_fill_txs(dev, sta, info, txs_data);
++		if (!txs_valid) {
+ 			info->status.rates[0].count = 0;
+ 			info->status.rates[0].idx = -1;
+ 		}
++		dev_info_ratelimited(mdev->dev,
++			"W103D-DIAG txs_result=hit frame=unknown correlation=wcid_pid wcid=%u pid=%d raw0=%08x ack_timeout=%u ack_flag=%u valid=%u rate=%d retries=%u\n",
++			(unsigned int)sta->wcid.idx, pid,
++			(unsigned int)le32_to_cpu(txs_data[0]),
++			(unsigned int)!!(le32_to_cpu(txs_data[0]) & MT_TXS0_ACK_TIMEOUT),
++			(unsigned int)!!(info->flags & IEEE80211_TX_STAT_ACK),
++			(unsigned int)txs_valid, info->status.rates[0].idx,
++			(unsigned int)info->status.rates[0].count);
+ 
+ 		mt76_tx_status_skb_done(mdev, skb, &list);
+ 	}
+@@ -1477,9 +1516,18 @@
+ 
+ 	pid = le32_get_bits(txs_data[0], MT_TXS0_PID);
+ 	wcidx = le32_get_bits(txs_data[2], MT_TXS2_WCID);
+-
+-	if (pid == MT_PACKET_ID_NO_ACK)
++	dev_info_ratelimited(dev->mt76.dev,
++		"W103D-DIAG txs_input frame=unknown correlation=wcid_pid wcid=%u pid=%u raw0=%08x ack_timeout=%u\n",
++		(unsigned int)wcidx, (unsigned int)pid,
++		(unsigned int)le32_to_cpu(txs_data[0]),
++		(unsigned int)!!(le32_to_cpu(txs_data[0]) & MT_TXS0_ACK_TIMEOUT));
++
++	if (pid == MT_PACKET_ID_NO_ACK) {
++		dev_info_ratelimited(dev->mt76.dev,
++			"W103D-DIAG txs_result=not_requested frame=unknown wcid=%u pid=%u\n",
++			(unsigned int)wcidx, (unsigned int)pid);
+ 		return;
++	}
+ 
+ 	if (wcidx >= MT7615_WTBL_SIZE)
+ 		return;
+@@ -1487,8 +1535,12 @@
+ 	rcu_read_lock();
+ 
+ 	wcid = mt76_wcid_ptr(dev, wcidx);
+-	if (!wcid)
++	if (!wcid) {
++		dev_info_ratelimited(dev->mt76.dev,
++			"W103D-DIAG txs_result=missing_wcid frame=unknown wcid=%u pid=%u\n",
++			(unsigned int)wcidx, (unsigned int)pid);
+ 		goto out;
++	}
+ 
+ 	msta = container_of(wcid, struct mt7615_sta, wcid);
+ 	sta = wcid_to_sta(wcid);
+@@ -1496,6 +1548,9 @@
+ 
+ 	if (mt7615_mac_add_txs_skb(dev, msta, pid, txs_data))
+ 		goto out;
++	dev_info_ratelimited(dev->mt76.dev,
++		"W103D-DIAG txs_result=lookup_miss frame=unknown correlation=wcid_pid wcid=%u pid=%u sta=%u\n",
++		(unsigned int)wcidx, (unsigned int)pid, (unsigned int)!!sta);
+ 
+ 	if (wcidx >= MT7615_WTBL_STA || !sta)
+ 		goto out;
+@@ -1622,8 +1677,15 @@
+ 	__le32 *rxd = (__le32 *)skb->data;
+ 	__le32 *end = (__le32 *)&skb->data[skb->len];
+ 	enum rx_pkt_type type;
++	u32 diag_rxd0 = 0;
++	u32 diag_len = skb->len;
++	u32 diag_headlen = skb_headlen(skb);
++	int rx_err;
+ 	u16 flag;
+-
++	bool diag_rxd_valid = diag_headlen >= sizeof(*rxd);
++
++	if (diag_rxd_valid)
++		diag_rxd0 = le32_to_cpu(rxd[0]);
+ 	type = le32_get_bits(rxd[0], MT_RXD0_PKT_TYPE);
+ 	flag = le32_get_bits(rxd[0], MT_RXD0_PKT_FLAG);
+ 	if (type == PKT_TYPE_RX_EVENT && flag == 0x1)
+@@ -1648,10 +1710,19 @@
+ 		break;
+ 	case PKT_TYPE_NORMAL_MCU:
+ 	case PKT_TYPE_NORMAL:
+-		if (!mt7615_mac_fill_rx(dev, skb)) {
++		rx_err = mt7615_mac_fill_rx(dev, skb);
++		if (!rx_err) {
+ 			mt76_rx(&dev->mt76, q, skb);
+ 			return;
+ 		}
++		if (diag_rxd_valid)
++			dev_info_ratelimited(mdev->dev,
++				"W103D-DIAG rx_drop=mac_fill_error rc=%d type=%u rxd0=%08x len=%u\n",
++				rx_err, (unsigned int)type, diag_rxd0, diag_len);
++		else
++			dev_info_ratelimited(mdev->dev,
++				"W103D-DIAG rx_drop=mac_fill_error rc=%d type=%u descriptor_short headlen=%u len=%u\n",
++				rx_err, (unsigned int)type, diag_headlen, diag_len);
+ 		fallthrough;
+ 	default:
+ 		dev_kfree_skb(skb);
+--- a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
+@@ -1840,7 +1840,10 @@
+ 					 struct mt76_tx_info *tx_info)
+ {
+ 	struct mt7615_dev *dev = container_of(mdev, struct mt7615_dev, mt76);
+-	struct ieee80211_hdr *hdr = (void *)tx_info->skb->data;
++	struct sk_buff *skb = tx_info->skb;
++	struct ieee80211_hdr *hdr = (void *)skb->data;
++	bool auth = skb->len >= sizeof(__le16) && skb_headlen(skb) >= sizeof(__le16) &&
++		ieee80211_is_auth(hdr->frame_control);
+ 	bool is_data = ieee80211_is_data_present(hdr->frame_control);
+ 	bool firmware_ba = is_data && ieee80211_is_data_qos(hdr->frame_control) &&
+ 		!is_multicast_ether_addr(hdr->addr1);
+@@ -1860,9 +1863,42 @@
+ 
+ 	ret = mt7663_usb_sdio_tx_prepare_skb(mdev, txwi_ptr, qid, wcid, sta,
+ 					     tx_info);
+-	if (ret || !sta || !dev->mphy.chandef.chan ||
+-	    dev->mphy.chandef.chan->band != NL80211_BAND_5GHZ)
++	if (ret)
+ 		return ret;
++
++	if (sta && dev->mphy.chandef.chan &&
++	    dev->mphy.chandef.chan->band == NL80211_BAND_5GHZ)
++		mt7663s_w103d_fix_5g_tx_rate(dev, sta, tx_info, is_data, firmware_ba);
++
++	/* On this SDIO path the shared helper leaves skb->data at TXWI after
++	 * pushing the descriptor.  The 5 GHz fixer above uses this same pointer.
++	 * Log only after successful preparation; error returns may free the skb.
++	 */
++	if (auth && tx_info->skb) {
++		struct sk_buff *prepared = tx_info->skb;
++
++		if (skb_headlen(prepared) >= 7 * sizeof(__le32)) {
++			__le32 *txwi = (__le32 *)prepared->data;
++			u32 txwi1 = le32_to_cpu(txwi[1]);
++			u32 txwi5 = le32_to_cpu(txwi[5]);
++			u32 txwi6 = le32_to_cpu(txwi[6]);
++
++			dev_info_ratelimited(mdev->dev,
++				"W103D-DIAG tx_descriptor_auth sta=%u freq=%u band=%u wcid=%u pid=%u rate_field=%u txwi1=%08x txwi2=%08x txwi5=%08x txwi6=%08x\n",
++				(unsigned int)!!sta,
++				(unsigned int)(dev->mphy.chandef.chan ? dev->mphy.chandef.chan->center_freq : 0),
++				(unsigned int)(dev->mphy.chandef.chan ? dev->mphy.chandef.chan->band : 0),
++				(unsigned int)FIELD_GET(MT_TXD1_WLAN_IDX, txwi1),
++				(unsigned int)FIELD_GET(MT_TXD5_PID, txwi5),
++				(unsigned int)FIELD_GET(MT_TXD6_TX_RATE, txwi6),
++				(unsigned int)txwi1, (unsigned int)le32_to_cpu(txwi[2]),
++				(unsigned int)txwi5, (unsigned int)txwi6);
++		} else {
++			dev_info_ratelimited(mdev->dev,
++				"W103D-DIAG tx_descriptor_auth_short sta=%u headlen=%u\n",
++				(unsigned int)!!sta, skb_headlen(prepared));
++		}
++	}
+ 
+ 	/* The shared SDIO rate worker writes the WTBL rate table through blocked
+ 	 * 0x82xxxx registers, then marks that table valid.  Carry minstrel's
+@@ -1871,8 +1907,6 @@
+ 	 * management/control frames to mandatory 6 Mbps OFDM as well: leaving
+ 	 * their descriptor unfixed still selects the same inaccessible WTBL table.
+ 	 */
+-	mt7663s_w103d_fix_5g_tx_rate(dev, sta, tx_info, is_data, firmware_ba);
+-
+ 	return 0;
+ }
+ 
+--- a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_txrx.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_txrx.c
+@@ -154,19 +154,26 @@
+ 		if (unlikely(len < sizeof(*rxd) || len > lengths[i] ||
+ 			     span > end - buf)) {
+ 			dev_err_ratelimited(dev->dev,
+-				"W103D: invalid RX packet length %d/%u\n",
+-				len, lengths[i]);
++				"W103D-DIAG rx_drop=invalid_length len=%d input_len=%u span=%d\n",
++				len, lengths[i], span);
+ 			goto next;
+ 		}
+ 
+ 		/* Optimized path for TXS */
+ 		if (!dev->drv->rx_check || dev->drv->rx_check(dev, buf, len)) {
+-			if (q->queued + queued >= q->ndesc)
++			if (q->queued + queued >= q->ndesc) {
++				dev_info_ratelimited(dev->dev,
++					"W103D-DIAG rx_drop=queue_full len=%d qhead=%u queued=%d ndesc=%u\n",
++					len, q->head, q->queued + queued, q->ndesc);
+ 				goto next;
+-			e->skb = mt76s_build_rx_skb(buf, len,
+-						    span);
+-			if (!e->skb)
++			}
++			e->skb = mt76s_build_rx_skb(buf, len, span);
++			if (!e->skb) {
++				dev_info_ratelimited(dev->dev,
++					"W103D-DIAG rx_drop=skb_alloc len=%d span=%d\n",
++					len, span);
+ 				goto next;
++			}
+ 
+ 			queued++;
+ 		}

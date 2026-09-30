@@ -77,6 +77,8 @@ def main() -> int:
     ap.add_argument("--source-dir", type=Path, required=True)
     ap.add_argument("--toolchain-archive", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--patch", type=Path,
+                    help="apply a reviewed source patch before building diagnostic modules")
     args = ap.parse_args()
     args.lock = args.lock.resolve()
     args.audit_report = args.audit_report.resolve()
@@ -84,8 +86,11 @@ def main() -> int:
     args.source_dir = args.source_dir.resolve()
     args.toolchain_archive = args.toolchain_archive.resolve()
     args.out = args.out.resolve()
+    if args.patch:
+        args.patch = args.patch.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
-    report: dict = {"build_kind": "unmodified-baseline", "modules": [], "errors": [],
+    report: dict = {"build_kind": "instrumented-diagnostic" if args.patch else "unmodified-baseline",
+                    "modules": [], "errors": [],
                     "limitations": ["This is an isolated GHA build; no module is installed or loaded on a device."]}
     try:
         lock = json.loads(args.lock.read_text())
@@ -100,10 +105,12 @@ def main() -> int:
                            text=True, capture_output=True, timeout=15, check=True)
         if p.stdout.strip() != expected_commit:
             raise RuntimeError("source checkout does not match locked Ophub kernel commit")
+        source_clean = subprocess.run(
+            ["git", "-C", str(args.source_dir), "status", "--porcelain"],
+            text=True, capture_output=True, timeout=15, check=True).stdout.strip() == ""
         report["source"] = {"repository": "ophub/linux-6.18.y", "commit": expected_commit,
-                            "working_tree_clean": subprocess.run(
-                                ["git", "-C", str(args.source_dir), "status", "--porcelain"],
-                                text=True, capture_output=True, timeout=15, check=True).stdout.strip() == ""}
+                            "clean_before_patch": source_clean, "base_clean": source_clean,
+                            "working_tree_clean": source_clean}
         source_lock = lock["kernel_input_manifest"]["ophub_source_lock"]
         report["provenance"] = {
             "recovery_run_id": lock["kernel_input_manifest"]["kernel_run_id"],
@@ -114,8 +121,36 @@ def main() -> int:
             "kernel_config_path": source_lock["kernel"]["config_path"],
             "kernel_config_sha256": source_lock["kernel"]["config_sha256"],
         }
-        if not report["source"]["working_tree_clean"]:
+        if not report["source"]["clean_before_patch"]:
             raise RuntimeError("baseline source tree must be unmodified")
+        if args.patch:
+            if not args.patch.is_file():
+                raise RuntimeError("diagnostic patch file is missing")
+            allowed = {
+                "drivers/net/wireless/mediatek/mt76/mt7615/mac.c",
+                "drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c",
+                "drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_txrx.c",
+            }
+            subprocess.run(["git", "-C", str(args.source_dir), "apply", "--check",
+                            "--whitespace=error", str(args.patch)], check=True,
+                           capture_output=True, timeout=15)
+            subprocess.run(["git", "-C", str(args.source_dir), "apply", "--whitespace=error",
+                            str(args.patch)], check=True, capture_output=True, timeout=15)
+            changed = set(subprocess.run(
+                ["git", "-C", str(args.source_dir), "diff", "--name-only"],
+                text=True, capture_output=True, timeout=15, check=True).stdout.splitlines())
+            if changed != allowed:
+                raise RuntimeError(f"diagnostic patch changed unexpected source paths: {sorted(changed ^ allowed)}")
+            report["source"]["working_tree_clean"] = False
+            patch_diff = subprocess.run(
+                ["git", "-C", str(args.source_dir), "diff", "--binary", "HEAD"],
+                capture_output=True, timeout=15, check=True).stdout
+            report["diagnostic_patch"] = {
+                "filename": args.patch.name,
+                "sha256": sha256(args.patch),
+                "applied_diff_sha256": hashlib.sha256(patch_diff).hexdigest(),
+                "changed_paths": sorted(changed),
+            }
 
         archive = one([p for p in args.recovery_dir.rglob("6.18.54.tar.gz")], "runtime archive")
         if sha256(archive) != fixed["archive_sha256"]:
@@ -182,6 +217,10 @@ def main() -> int:
                     argv.append(f"KBUILD_EXTRA_SYMBOLS={extra}")
             run_logged(argv, args.out / f"build-{module}.log", 420)
         report["build_seconds"] = round(time.monotonic()-started, 2)
+        if any("Skipping BTF generation" in p.read_text(errors="replace")
+               for p in args.out.glob("build-*.log")):
+            report["limitations"].append(
+                "Kernel build headers lacked vmlinux; BTF generation was skipped for these external modules.")
         for module, mdir in targets:
             path = one(list(mdir.glob(module)), module)
             vermagic = modinfo(path, "vermagic")
@@ -198,15 +237,22 @@ def main() -> int:
                                       "host_hash_matches": module_sha == host_sha if host_sha else None,
                                       "hash_match_is_informational": True})
             shutil.copy2(path, args.out / module)
-        report["baseline_build_complete"] = True
+        report["build_complete"] = True
+        report["baseline_build_complete"] = not bool(args.patch)
+        report["diagnostic_build_complete"] = bool(args.patch)
         report["limitations"].append("Only mt7615-common.ko and mt7663s.ko were requested; external-module build success is not device-load or connectivity acceptance.")
     except Exception as exc:
         report["errors"].append(f"{type(exc).__name__}: {str(exc)[:500]}")
+        report["build_complete"] = False
         report["baseline_build_complete"] = False
+        report["diagnostic_build_complete"] = False
     (args.out / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps({"baseline_build_complete": report["baseline_build_complete"],
+    complete = report["build_complete"]
+    print(json.dumps({"build_kind": report["build_kind"], "build_complete": complete,
+                      "baseline_build_complete": report["baseline_build_complete"],
+                      "diagnostic_build_complete": report["diagnostic_build_complete"],
                       "modules": report.get("modules", []), "errors": report["errors"]}, separators=(",", ":")), flush=True)
-    return 0 if report["baseline_build_complete"] else 1
+    return 0 if report["build_complete"] else 1
 
 
 if __name__ == "__main__":

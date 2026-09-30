@@ -1,0 +1,110 @@
+name: W103D MT76 bounded diagnostic module build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-diagnostic:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Validate the fixed recovery run lineage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          recovery=$(python3 -c 'import json;print(json.load(open("config/wifi-module-preflight.lock.json"))["recovery_run"]["id"])')
+          source=$(python3 -c 'import json;print(json.load(open("config/wifi-module-preflight.lock.json"))["source_compile_run"]["id"])')
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$recovery" > "$RUNNER_TEMP/recovery-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$recovery/jobs?per_page=100" > "$RUNNER_TEMP/recovery-jobs.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$recovery/artifacts?per_page=100" > "$RUNNER_TEMP/recovery-artifacts.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$source" > "$RUNNER_TEMP/source-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$source/jobs?per_page=100" > "$RUNNER_TEMP/source-jobs.json"
+          python3 scripts/audit_wifi_module_build_inputs.py \
+            --phase metadata --lock config/wifi-module-preflight.lock.json \
+            --recovery-run "$RUNNER_TEMP/recovery-run.json" \
+            --recovery-jobs "$RUNNER_TEMP/recovery-jobs.json" \
+            --recovery-artifacts "$RUNNER_TEMP/recovery-artifacts.json" \
+            --source-run "$RUNNER_TEMP/source-run.json" \
+            --source-jobs "$RUNNER_TEMP/source-jobs.json" \
+            --out "$RUNNER_TEMP/preflight.json"
+
+      - name: Download the exact existing recovery artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36680464101 --repo "$GITHUB_REPOSITORY" \
+            --name w103d-kernel-recovery-36680464101 --dir "$RUNNER_TEMP/recovery"
+
+      - name: Audit prepared headers and bundled modules
+        run: |
+          set -euo pipefail
+          if ! command -v modinfo >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends kmod
+          fi
+          python3 scripts/audit_wifi_module_build_inputs.py \
+            --phase audit --lock config/wifi-module-preflight.lock.json \
+            --recovery-run "$RUNNER_TEMP/recovery-run.json" \
+            --recovery-jobs "$RUNNER_TEMP/recovery-jobs.json" \
+            --recovery-artifacts "$RUNNER_TEMP/recovery-artifacts.json" \
+            --source-run "$RUNNER_TEMP/source-run.json" \
+            --source-jobs "$RUNNER_TEMP/source-jobs.json" \
+            --artifact-dir "$RUNNER_TEMP/recovery" \
+            --out "$RUNNER_TEMP/preflight.json"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r.get("audit_complete") and r.get("inputs_ready") and r.get("artifact_provenance_valid"), "recovery inputs are not ready"' "$RUNNER_TEMP/preflight.json"
+
+      - name: Fetch the exact locked Ophub kernel source
+        run: |
+          set -euo pipefail
+          commit=$(python3 -c 'import json;print(json.load(open("config/wifi-module-preflight.lock.json"))["kernel_input_manifest"]["ophub_source_lock"]["kernel"]["commit"])')
+          git init "$RUNNER_TEMP/linux-6.18.y"
+          git -C "$RUNNER_TEMP/linux-6.18.y" remote add origin https://github.com/ophub/linux-6.18.y.git
+          git -C "$RUNNER_TEMP/linux-6.18.y" fetch --depth=1 origin "$commit"
+          git -C "$RUNNER_TEMP/linux-6.18.y" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/linux-6.18.y" rev-parse HEAD)" = "$commit"
+
+      - name: Fetch the locked GNU toolchain
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          from pathlib import Path
+          lock=json.load(open('config/wifi-module-preflight.lock.json'))['kernel_input_manifest']['ophub_source_lock']['kernel_toolchain']
+          target=Path(os.environ['RUNNER_TEMP'])/'toolchain.tar.xz'
+          urllib.request.urlretrieve(lock['download_url'], target)
+          if target.stat().st_size != lock['size']:
+              raise SystemExit('toolchain asset size mismatch')
+          PY
+
+      - name: Apply the bounded Wi-Fi diagnostics patch and build only the two MT76 modules
+        run: |
+          set -euo pipefail
+          python3 scripts/build_w103d_mt76_baseline.py \
+            --lock config/wifi-module-preflight.lock.json \
+            --audit-report "$RUNNER_TEMP/preflight.json" \
+            --recovery-dir "$RUNNER_TEMP/recovery" \
+            --source-dir "$RUNNER_TEMP/linux-6.18.y" \
+            --toolchain-archive "$RUNNER_TEMP/toolchain.tar.xz" \
+            --patch patches/w103d/mt76-wifi-auth-diagnostics.patch \
+            --out "$RUNNER_TEMP/mt76-diagnostic"
+
+      - name: Upload only diagnostic modules and bounded diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-mt76-diagnostic-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/mt76-diagnostic/manifest.json
+            ${{ runner.temp }}/mt76-diagnostic/mt7615-common.ko
+            ${{ runner.temp }}/mt76-diagnostic/mt7663s.ko
+            ${{ runner.temp }}/mt76-diagnostic/build-*.log
+          if-no-files-found: warn
+          retention-days: 14
