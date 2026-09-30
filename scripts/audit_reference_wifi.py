@@ -8,6 +8,7 @@ import json
 import posixpath
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 
@@ -17,6 +18,10 @@ SPARSE_MAGIC = b"\x3a\xff\x26\xed"
 MODULE_RE = re.compile(r"(?:mt76|mt7663|btmtk|mac80211|cfg80211)", re.I)
 FW_NAMES = ("mt7663pr2h_rebb.bin", "mt7663_n9_rebb.bin",
             "mt7663pr2h.bin", "mt7663_n9_v3.bin")
+FW_EXPORT_ALLOWLIST = {
+    "mt7663_n9_v3.bin": "223f73f17f0f986dc4e7167daa6eef14ffb41c713f22d70f9645eb049bdec80a",
+    "mt7663pr2h.bin": "534f2152f9b0f48dfcec9c1727b0bab9a3727a655d76d5ec818cc39a55602336",
+}
 
 
 def run(*argv: str, timeout: int = 60, check: bool = True) -> subprocess.CompletedProcess:
@@ -108,6 +113,78 @@ def extract_firmware(raw: Path, requested_path: str, allowed_roots: tuple[str, .
             "error": "firmware symlink depth exceeds 8"}
 
 
+def export_allowed_firmware(raw: Path, candidates: list[dict], destination: Path,
+                            reference_lock: dict, source_run: str,
+                            source_run_url: str, scratch: Path) -> dict:
+    if destination.exists() and any(destination.iterdir()):
+        raise RuntimeError("firmware export directory must be empty")
+    destination.mkdir(parents=True, exist_ok=True)
+    by_name = {Path(item.get("requested_path", "")).name: item for item in candidates
+               if item.get("requested_path")}
+    allowed_roots = ("/usr/lib/firmware/mediatek", "/lib/firmware/mediatek")
+    exported: list[Path] = []
+    manifest = {"reference_release_tag": reference_lock["release_tag"],
+                "reference_asset_name": reference_lock["asset_name"],
+                "reference_image_sha256": reference_lock["image_sha256"],
+                "source_workflow_run_id": str(source_run),
+                "source_workflow_run_url": source_run_url,
+                "files": []}
+    try:
+        for filename, expected_hash in FW_EXPORT_ALLOWLIST.items():
+            candidate = by_name.get(filename)
+            requested = candidate.get("requested_path") if candidate else None
+            if not candidate or not candidate.get("present") or not requested:
+                raise RuntimeError(f"allowlisted firmware is unavailable: {filename}")
+            staged = scratch / f"export-{filename}"
+            resolved = extract_firmware(raw, requested, allowed_roots, staged)
+            if not resolved.get("present"):
+                raise RuntimeError(f"cannot extract {filename}: {resolved.get('error')}")
+            if resolved["sha256"] != expected_hash:
+                raise RuntimeError(f"SHA-256 mismatch for {filename}: {resolved['sha256']}")
+            target = destination / filename
+            if target.exists() or target.is_symlink():
+                raise RuntimeError(f"refusing to overwrite export target {filename}")
+            shutil.copyfile(staged, target)
+            exported.append(target)
+            output_hash = digest(target)
+            if output_hash != expected_hash:
+                raise RuntimeError(f"post-copy SHA-256 mismatch for {filename}")
+            manifest["files"].append({"name": filename, "size": target.stat().st_size,
+                "sha256": output_hash, "expected_sha256": expected_hash,
+                "source_requested_path": requested,
+                "source_resolved_path": resolved["resolved_path"]})
+        manifest_path = destination / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+        exported.append(manifest_path)
+        return manifest
+    except Exception:
+        for path in exported:
+            path.unlink(missing_ok=True)
+        raise
+
+
+def expected_default_selection(candidates: dict[str, dict]) -> dict:
+    primary_rom = "mt7663pr2h.bin"
+    fallback_rom = "mt7663pr2h_rebb.bin"
+    primary_n9 = "mt7663_n9_v3.bin"
+    fallback_n9 = "mt7663_n9_rebb.bin"
+    primary_present = bool(candidates.get(primary_rom, {}).get("present"))
+    selected_rom = primary_rom if primary_present else fallback_rom
+    selected_n9 = primary_n9 if primary_present else fallback_n9
+    return {
+        "selector_default_prefer_offload_fw": True,
+        "runtime_prefer_offload_fw_override": "unknown",
+        "expected_by_reference_availability": "offload" if primary_present else "fallback",
+        "assumption": "the expected primary ROM patch loads successfully; file presence alone does not prove MCU accepted it",
+        "actual_loaded_rom_and_n9": "unknown without runtime firmware-loading logs or controller evidence",
+        "rom_requested_by_default": primary_rom,
+        "fallback_rom": fallback_rom,
+        "n9_paired_with_rom": selected_n9,
+        "required_for_selected_default_path": [selected_rom, selected_n9],
+        "optional_unselected_alternatives": [fallback_rom, fallback_n9] if primary_present else [],
+    }
+
+
 def debugfs_names(raw: Path, path: str) -> list[str]:
     result = run("debugfs", "-R", f"ls -l {path}", str(raw), timeout=60, check=False)
     if result.returncode:
@@ -186,7 +263,11 @@ def list_modules(root: Path, release: str, scratch: Path, report: dict) -> None:
         report["modules"]["selected_hashes"].append(record)
 
 
-def audit(components: Path, report: dict, scratch: Path) -> None:
+def audit(components: Path, report: dict, scratch: Path,
+          export_firmware_dir: Path | None = None,
+          reference_lock: dict | None = None,
+          source_run: str | None = None,
+          source_run_url: str | None = None) -> None:
     data = components / "data.PARTITION"
     system = components / "system.PARTITION"
     if not data.is_file() or not system.is_file():
@@ -289,6 +370,7 @@ def audit(components: Path, report: dict, scratch: Path) -> None:
         fw_entries = debugfs_names(root_image, fw_path)
     report["firmware"]["root_path"] = fw_path
     allowed_mtk_roots = ("/usr/lib/firmware/mediatek", "/lib/firmware/mediatek")
+    candidate_errors: dict[str, str] = {}
     for name in FW_NAMES:
         possible = [f"{fw_path}/{name}"]
         possible.extend(f"{fw_path}/{entry}/{name}" for entry in fw_entries)
@@ -299,8 +381,8 @@ def audit(components: Path, report: dict, scratch: Path) -> None:
             if result["present"]:
                 found = result
                 break
-            if result.get("error") not in ("debugfs stat could not resolve requested path",):
-                report["errors"].append(f"firmware symlink/target error for {path}: {result['error']}")
+            if result.get("error") != "debugfs stat could not resolve requested path":
+                candidate_errors[name] = result["error"]
         report["firmware"]["candidates"].append(found or {"name": name, "present": False})
 
     # Resolve only firmware named by the target mt7663s module's modinfo metadata.
@@ -310,24 +392,61 @@ def audit(components: Path, report: dict, scratch: Path) -> None:
                               for name in (item.get("firmware_metadata") or [])})
     report["firmware"]["module_declared"] = []
     report["firmware"]["limitations"] = []
+    candidate_by_name = {item.get("name") or Path(item.get("requested_path", "")).name: item
+                         for item in report["firmware"]["candidates"]}
     if not target_modules or not target_firmware:
         limitation = "mt7663s module firmware declarations unavailable; actual loaded firmware cannot be identified"
         report["firmware"]["limitations"].append(limitation)
         report["errors"].append(limitation)
     else:
-        fw_base = "/usr/lib/firmware"
-        if not debugfs_names(root_image, fw_base):
-            fw_base = "/lib/firmware"
+        for index, declared in enumerate(target_firmware):
+            name = Path(declared).name
+            record = dict(candidate_by_name.get(name, {"name": name, "present": False}))
+            record["declared_name"] = declared
+            record["required_by_default_selector"] = False
+            record["availability_status"] = "available" if record.get("present") else "absent"
+            report["firmware"]["module_declared"].append(record)
+
+        report["firmware"]["selection"] = expected_default_selection(candidate_by_name)
+        selection = report["firmware"]["selection"]
+        primary_present = candidate_by_name.get("mt7663pr2h.bin", {}).get("present", False)
+        selected_rom, selected_n9 = selection["required_for_selected_default_path"]
+        if not primary_present:
+            detail = candidate_errors.get("mt7663pr2h.bin", "not present")
+            report["errors"].append(f"default primary Wi-Fi ROM patch missing: mt7663pr2h.bin ({detail})")
+        for required in (selected_rom, selected_n9):
+            if not candidate_by_name.get(required, {}).get("present"):
+                detail = candidate_errors.get(required, "not present")
+                report["errors"].append(f"required selected Wi-Fi firmware missing: {required} ({detail})")
+        for item in report["firmware"]["module_declared"]:
+            item["required_by_default_selector"] = Path(item["declared_name"]).name in (selected_rom, selected_n9)
+
+        known_candidate_names = set(candidate_by_name)
+        fw_base = "/usr/lib/firmware" if debugfs_names(root_image, "/usr/lib/firmware") else "/lib/firmware"
         allowed_fw_roots = ("/usr/lib/firmware", "/lib/firmware")
         for index, declared in enumerate(target_firmware):
+            name = Path(declared).name
+            if name in known_candidate_names:
+                continue
             requested = posixpath.normpath(posixpath.join(fw_base, declared.lstrip("/")))
-            local = scratch / "firmware" / f"module-declared-{index}"
-            record = extract_firmware(root_image, requested, allowed_fw_roots, local)
+            record = extract_firmware(root_image, requested, allowed_fw_roots,
+                                      scratch / "firmware" / f"declared-extra-{index}")
             record["declared_name"] = declared
+            record["availability_status"] = "available" if record.get("present") else "unknown"
             report["firmware"]["module_declared"].append(record)
-            if not record["present"]:
-                report["errors"].append(
-                    f"mt7663s-declared firmware {declared} unresolved: {record.get('error')}")
+            if not record.get("present"):
+                limitation = f"additional module-declared firmware not resolved: {declared}"
+                report["firmware"]["limitations"].append(limitation)
+
+        if export_firmware_dir:
+            try:
+                manifest = export_allowed_firmware(
+                    root_image, report["firmware"]["candidates"], export_firmware_dir,
+                    reference_lock or {}, source_run or "", source_run_url or "", scratch)
+                report["firmware"]["export"] = {"success": True, "manifest": manifest}
+            except Exception as exc:
+                report["firmware"]["export"] = {"success": False, "error": f"{type(exc).__name__}: {str(exc)[:700]}"}
+                report["errors"].append(f"allowlisted firmware export failed: {report['firmware']['export']['error']}")
 
     status_path = "/usr/lib/dpkg/status"
     status_local = scratch / "dpkg-status"
@@ -360,7 +479,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--components", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--export-firmware-dir", type=Path)
+    parser.add_argument("--reference-lock", type=Path)
+    parser.add_argument("--source-run")
+    parser.add_argument("--source-run-url")
     args = parser.parse_args()
+    export_requested = args.export_firmware_dir is not None
+    if export_requested and not all((args.reference_lock, args.source_run, args.source_run_url)):
+        parser.error("firmware export requires --reference-lock, --source-run, and --source-run-url")
+    reference_lock = json.loads(args.reference_lock.read_text()) if args.reference_lock else None
     report = {
         "audit_complete": False,
         "scope": "read-only metadata and hashes; no image modifications, mounts, or binary execution",
@@ -373,7 +500,9 @@ def main() -> int:
     }
     try:
         with tempfile.TemporaryDirectory(prefix="w103d-wifi-audit-") as td:
-            audit(args.components.resolve(strict=True), report, Path(td))
+            audit(args.components.resolve(strict=True), report, Path(td),
+                  args.export_firmware_dir, reference_lock, args.source_run,
+                  args.source_run_url)
     except Exception as exc:  # Always leave a machine-readable incomplete report for the artifact.
         report["errors"].append(f"audit aborted: {type(exc).__name__}: {str(exc)[:700]}")
     report["audit_complete"] = not report["errors"]
@@ -386,6 +515,8 @@ def main() -> int:
                       "selected_module_hash_count": len(report["modules"]["selected_hashes"]),
                       "firmware_present": sum(x.get("present", False) for x in report["firmware"]["candidates"]),
                       "errors": report["errors"], "report": str(args.out)}, indent=2))
+    if export_requested and not report.get("firmware", {}).get("export", {}).get("success"):
+        return 1
     return 0
 
 

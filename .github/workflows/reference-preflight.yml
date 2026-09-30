@@ -14,6 +14,11 @@ on:
         required: false
         type: boolean
         default: false
+      export_wifi_firmware:
+        description: "Export the hash-locked MT7663 W103D ROM patch and N9 v3 firmware"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -68,14 +73,45 @@ jobs:
             --out "$RUNNER_TEMP/reference-layout.json" \
             | tee "$RUNNER_TEMP/reference-inspection-summary.json"
       - name: Audit reference Wi-Fi and kernel metadata
-        if: ${{ inputs.audit_wifi }}
+        if: ${{ inputs.audit_wifi || inputs.export_wifi_firmware }}
         run: |
           set -euo pipefail
           sudo apt-get install --yes kmod
-          python3 scripts/audit_reference_wifi.py \
-            --components "$RUNNER_TEMP/reference/components" \
-            --out "$RUNNER_TEMP/reference-wifi-audit.json" \
+          audit_args=(
+            --components "$RUNNER_TEMP/reference/components"
+            --out "$RUNNER_TEMP/reference-wifi-audit.json"
+          )
+          if [[ "${{ inputs.export_wifi_firmware }}" == "true" ]]; then
+            audit_args+=(
+              --export-firmware-dir "$RUNNER_TEMP/reference-wifi-firmware"
+              --reference-lock config/reference.lock.json
+              --source-run "$GITHUB_RUN_ID"
+              --source-run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            )
+          fi
+          python3 scripts/audit_reference_wifi.py "${audit_args[@]}" \
             | tee "$RUNNER_TEMP/reference-wifi-audit-summary.json"
+      - name: Verify reference Wi-Fi firmware export
+        id: verify_firmware_export
+        if: ${{ inputs.export_wifi_firmware }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/reference-wifi-firmware"
+          test -s "$export_dir/mt7663_n9_v3.bin"
+          test -s "$export_dir/mt7663pr2h.bin"
+          test -s "$export_dir/manifest.json"
+          jq -e '.firmware.export.success == true' "$RUNNER_TEMP/reference-wifi-audit.json"
+          n9_hash=$(jq -r '.files[] | select(.name == "mt7663_n9_v3.bin") | .sha256' "$export_dir/manifest.json")
+          patch_hash=$(jq -r '.files[] | select(.name == "mt7663pr2h.bin") | .sha256' "$export_dir/manifest.json")
+          expected_image=$(jq -r .image_sha256 config/reference.lock.json)
+          jq -e --arg image "$expected_image" '
+            .reference_image_sha256 == $image and
+            ([.files[].name] | sort) == ["mt7663_n9_v3.bin", "mt7663pr2h.bin"]
+          ' "$export_dir/manifest.json"
+          echo "$n9_hash  $export_dir/mt7663_n9_v3.bin" | sha256sum --check
+          echo "$patch_hash  $export_dir/mt7663pr2h.bin" | sha256sum --check
+          test "$n9_hash" = "223f73f17f0f986dc4e7167daa6eef14ffb41c713f22d70f9645eb049bdec80a"
+          test "$patch_hash" = "534f2152f9b0f48dfcec9c1727b0bab9a3727a655d76d5ec818cc39a55602336"
       - name: Upload preflight evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -91,3 +127,14 @@ jobs:
             ${{ runner.temp }}/reference-wifi-audit-summary.json
           if-no-files-found: warn
           retention-days: 30
+      - name: Upload hash-verified reference Wi-Fi firmware
+        if: ${{ success() && inputs.export_wifi_firmware && steps.verify_firmware_export.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: reference-wifi-firmware-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/reference-wifi-firmware/mt7663_n9_v3.bin
+            ${{ runner.temp }}/reference-wifi-firmware/mt7663pr2h.bin
+            ${{ runner.temp }}/reference-wifi-firmware/manifest.json
+          if-no-files-found: error
+          retention-days: 7
