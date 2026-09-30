@@ -16,7 +16,7 @@ import tempfile
 import zlib
 
 from prepare_kernel_input import safe_members, sha256, verify_inner_checksums
-from verify_rebuilt_system import module_relative_path
+from verify_rebuilt_system import module_relative_path, parse_kv
 from inspect_reference import sparse_to_raw
 
 
@@ -119,6 +119,10 @@ def main() -> int:
     version, release = kernel["kernel_version"], kernel["kernel_release"]
     if release != version + "-ophub" or assembly.get("kernel_release") != release:
         raise SystemExit("kernel release disagreement between source, assembly and final verification")
+    armbian_version=assembly.get("armbian_version", "")
+    expected_name=f"W103D_Armbian_Trixie-{armbian_version}_Kernel-{version}_USB_Burning_Tool.img"
+    if not armbian_version or image.name != expected_name:
+        raise SystemExit(f"final IMG basename does not encode verified Armbian/kernel versions: expected {expected_name!r}, got {image.name!r}")
     verify_inner_checksums(a.kernel_archive, version)
     with tarfile.open(a.kernel_archive, "r:gz") as outer:
         boot_bundle = one([m for m in safe_members(outer) if m.isfile() and PurePosixPath(m.name).name.startswith("boot-")], "boot archive")
@@ -229,6 +233,9 @@ def main() -> int:
         try:
             os_release = (mountpoint / "etc/os-release").read_text(errors="replace")
             ophub_release = (mountpoint / "etc/ophub-release").read_text(errors="replace")
+            armbian_release = parse_kv(mountpoint / "etc/armbian-release")
+            if armbian_release.get("VERSION") != armbian_version:
+                raise SystemExit("packed rootfs /etc/armbian-release version differs from output basename")
             if "VERSION_CODENAME=trixie" not in os_release or "DISK_TYPE='emmc'" not in ophub_release:
                 raise SystemExit("rootfs readback is not Trixie/emmc")
             fstab = (mountpoint / "etc/fstab").read_text()
@@ -319,7 +326,7 @@ def main() -> int:
         finally:
             subprocess.run(["umount", str(mountpoint)], check=True)
         report = {
-            "final_image": image.name, "bytes": image.stat().st_size, "sha256": digest,
+            "final_image": image.name, "armbian_version": armbian_version, "kernel_version": version, "bytes": image.stat().st_size, "sha256": digest,
             "container_check": "passed", "unpacked_payloads": sorted(parts),
             "preserved_vendor_payload_sha256": preserved,
             "sparse_roundtrip": {"system": boot_info, "data": root_info},

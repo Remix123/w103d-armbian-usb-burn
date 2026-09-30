@@ -183,6 +183,11 @@ def main() -> int:
             os_fields = parse_kv(os_release)
             if os_fields.get("VERSION_CODENAME") != "trixie" or "debian" not in (os_fields.get("ID", "") + " " + os_fields.get("ID_LIKE", "")).lower():
                 raise SystemExit(f"rebuilt rootfs is not Debian Trixie: {os_fields}")
+            armbian_release = find_exact_mount_path(mounts, [Path("etc/armbian-release")], "/etc/armbian-release")
+            armbian_fields = parse_kv(armbian_release)
+            armbian_version = armbian_fields.get("VERSION", "")
+            if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", armbian_version):
+                raise SystemExit(f"/etc/armbian-release has no supported numeric VERSION: {armbian_fields}")
             ophub_release = find_exact_mount_path(mounts, [Path("etc/ophub-release")], "/etc/ophub-release")
             ophub_fields = parse_kv(ophub_release)
             board_values = " ".join(v for k, v in ophub_fields.items() if "BOARD" in k).lower()
@@ -234,6 +239,8 @@ def main() -> int:
                 "image_sha256": sha256(image),
                 "kernel_version": version,
                 "kernel_release": release,
+                "armbian_version": armbian_version,
+                "armbian_release": armbian_fields,
                 "os_release": os_fields,
                 "ophub_release": ophub_fields,
                 "kernel_archives": {"boot": boot_archive_name, "dtb": dtb_archive_name, "modules": modules_archive_name},

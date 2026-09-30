@@ -148,6 +148,28 @@ def verify_artifact_download(transfer: Path, out: Path, expected_name: str, expe
     return extracted
 
 
+def extract_raw_artifact(transfer: Path, output: Path, expected_name: str, expected_sha256: str, expected_bytes: int) -> Path:
+    transfer = transfer.resolve(strict=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if transfer.stat().st_size == expected_bytes and sha256(transfer) == expected_sha256:
+        shutil.copyfile(transfer, output)
+    else:
+        if not zipfile.is_zipfile(transfer):
+            raise ValueError("artifact transfer is neither the expected raw IMG nor a ZIP wrapper")
+        with zipfile.ZipFile(transfer) as outer:
+            bad = outer.testzip()
+            if bad is not None:
+                raise ValueError(f"raw artifact transport ZIP CRC failed: {bad}")
+            members = [item for item in outer.infolist() if not item.is_dir() and PurePosixPath(item.filename).name == expected_name]
+            if len(members) != 1:
+                raise ValueError(f"artifact transport must contain one {expected_name}: {[m.filename for m in members]}")
+            with outer.open(members[0]) as source, output.open("wb") as destination:
+                shutil.copyfileobj(source, destination, 1024 * 1024)
+    if output.name != expected_name or output.stat().st_size != expected_bytes or sha256(output) != expected_sha256:
+        raise ValueError("retrieved raw IMG bytes differ from verified artifact metadata/report")
+    return output
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -167,15 +189,24 @@ def main() -> None:
     transfer.add_argument("--expected-zip-sha256", required=True)
     transfer.add_argument("--expected-image", required=True)
     transfer.add_argument("--expected-image-sha256", required=True)
+    raw = sub.add_parser("extract-raw-artifact")
+    raw.add_argument("--transfer", type=Path, required=True)
+    raw.add_argument("--output", type=Path, required=True)
+    raw.add_argument("--expected-name", required=True)
+    raw.add_argument("--expected-sha256", required=True)
+    raw.add_argument("--expected-bytes", type=int, required=True)
     args = parser.parse_args()
     if args.command == "package":
         archive = build_package(args.image, args.reports, args.out, args.zip_name)
         print(json.dumps(verify_archive(archive), indent=2, sort_keys=True))
     elif args.command == "verify":
         print(json.dumps(verify_archive(args.zip, args.expected_image, args.expected_image_sha256), indent=2, sort_keys=True))
-    else:
+    elif args.command == "verify-artifact-download":
         result = verify_artifact_download(args.transfer, args.out, args.expected_name, args.expected_zip_sha256, args.expected_image, args.expected_image_sha256)
         print(json.dumps(verify_archive(result, args.expected_image, args.expected_image_sha256), indent=2, sort_keys=True))
+    else:
+        result = extract_raw_artifact(args.transfer, args.output, args.expected_name, args.expected_sha256, args.expected_bytes)
+        print(json.dumps({"image": result.name, "bytes": result.stat().st_size, "sha256": sha256(result)}, indent=2))
 
 
 if __name__ == "__main__":

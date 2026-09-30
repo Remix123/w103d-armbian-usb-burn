@@ -184,8 +184,9 @@ def main() -> int:
               a.sources_lock, a.base_image_lock, a.ophub_boot_emmc, a.packer):
         if not p.exists():
             raise SystemExit(f"required input does not exist: {p}")
-    if a.output.exists() or a.work.exists():
-        raise SystemExit("work and output paths must be new")
+    output_template = a.output.as_posix()
+    if "{armbian_version}" not in output_template or a.work.exists():
+        raise SystemExit("work must be new and output path must contain the {armbian_version} placeholder")
     a.work.mkdir(parents=True)
     checks = a.work / "checks"
     checks.mkdir()
@@ -231,6 +232,23 @@ def main() -> int:
     gunzip_sparse(a.system_image, unpacked_system)
     loop, mounts = mounted_partitions(unpacked_system, a.work)
     source_root = next(point for _, point in mounts if (point / "etc/os-release").is_file())
+    armbian_release = source_root / "etc/armbian-release"
+    if not armbian_release.is_file():
+        raise SystemExit("rebuilt system root has no /etc/armbian-release version metadata")
+    armbian_fields = {}
+    for line in armbian_release.read_text(errors="replace").splitlines():
+        line=line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value=line.split("=",1)
+            armbian_fields[key.strip().upper()]=value.strip().strip('"').strip("'")
+    armbian_version=armbian_fields.get("VERSION", "")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", armbian_version):
+        raise SystemExit(f"system /etc/armbian-release VERSION is invalid: {armbian_fields}")
+    a.output = Path(output_template.replace("{armbian_version}", armbian_version))
+    if a.output.exists():
+        raise SystemExit(f"versioned output already exists: {a.output}")
+    if system_report.get("armbian_version") not in (None, armbian_version):
+        raise SystemExit("mounted system /etc/armbian-release version differs from verified system report")
     source_boot_roots = [source_root / "boot"]
     for _, point in mounts:
         source_boot_roots.extend((point, point / "boot"))
@@ -405,6 +423,8 @@ def main() -> int:
         "system_input_sha256": hash_file(a.system_image), "kernel_archive_sha256": hash_file(a.kernel_archive),
         "kernel_release": release, "layout": {"boot_bytes": boot_raw.stat().st_size, "root_bytes": root_raw.stat().st_size,
             "boot_label": "W103D_BOOT", "root_label": "W103D_ROOT", "root_uuid": "01b94932-6a4a-4c81-9a71-20bd55b675a8"},
+        "armbian_version": armbian_version,
+        "armbian_release": armbian_fields,
         "sparse_roundtrip": layout_report,
         "boot_files_sha256": {p.relative_to(boot_src).as_posix(): hash_file(p) for p in boot_src.rglob("*") if p.is_file()},
         "boot_initrd_sha256": initrd_sha256,

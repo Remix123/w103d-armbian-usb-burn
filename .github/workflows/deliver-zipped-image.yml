@@ -58,49 +58,55 @@ jobs:
               raise SystemExit(f"expected one unexpired raw IMG and one verification artifact: {artifacts}")
           Path(os.environ['RUNNER_TEMP']+'/usb-image-name').write_text(image[0]['name'])
           Path(os.environ['RUNNER_TEMP']+'/usb-image-artifact-id').write_text(str(image[0]['id']))
+          Path(os.environ['RUNNER_TEMP']+'/usb-image-artifact.json').write_text(json.dumps(image[0]))
           with open(os.environ['GITHUB_OUTPUT'],'a') as out:
               out.write(f"image_name={image[0]['name']}\nimage_artifact_id={image[0]['id']}\n")
           PY
-          image_name=$(cat "$RUNNER_TEMP/usb-image-name")
-          gh run download "$USB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$image_name" --dir "$RUNNER_TEMP/usb-image"
           gh run download "$USB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "w103d-usb-burning-tool-verification-$USB_RUN_ID" --dir "$RUNNER_TEMP/usb-reports"
           mkdir -p outputs/input/reports
-          image=$(find "$RUNNER_TEMP/usb-image" -maxdepth 2 -type f -name '*.img' -print -quit)
-          test -n "$image"
-          cp "$image" "outputs/input/$image_name"
           cp -R "$RUNNER_TEMP/usb-reports/." outputs/input/reports/
           python3 - <<'PY'
           import json, os, re
           from pathlib import Path
           root=Path('outputs/input')
-          image=next(root.glob('*.img'))
           report=json.loads((root/'reports/verification-report.json').read_text())
           validation=(root/'reports/artifact-download-validation.txt').read_text()
-          metadata=json.loads((root/'reports/uploaded-artifact-metadata.json').read_text())
+          source_metadata=json.loads((root/'reports/uploaded-artifact-metadata.json').read_text())
+          listed_metadata=json.loads(Path(os.environ['RUNNER_TEMP']+'/usb-image-artifact.json').read_text())
+          image_name=Path(os.environ['RUNNER_TEMP']+'/usb-image-name').read_text()
           artifact_id=int(Path(os.environ['RUNNER_TEMP']+'/usb-image-artifact-id').read_text())
-          if report.get('final_image')!=image.name or report.get('hardware_flashed') is not False or report.get('hardware_boot_tested') is not False:
+          if report.get('final_image')!=image_name or report.get('hardware_flashed') is not False or report.get('hardware_boot_tested') is not False:
               raise SystemExit('USB report does not describe the expected offline-only IMG')
-          if metadata.get('id')!=artifact_id or metadata.get('name')!=image.name or metadata.get('expired'):
+          name_match=re.fullmatch(r'W103D_Armbian_Trixie-([0-9]+\.[0-9]+(?:\.[0-9]+)?)_Kernel-([0-9]+\.[0-9]+(?:\.[0-9]+)?)_USB_Burning_Tool\.img',image_name)
+          if not name_match or report.get('armbian_version')!=name_match.group(1) or report.get('kernel_version')!=name_match.group(2):
+              raise SystemExit('raw IMG basename does not encode its verified Armbian system and kernel versions')
+          if source_metadata.get('id')!=artifact_id or source_metadata.get('name')!=image_name or source_metadata.get('expired') or listed_metadata.get('id')!=artifact_id or listed_metadata.get('name')!=image_name or listed_metadata.get('expired'):
               raise SystemExit('source artifact metadata differs from the selected raw IMG')
           match=re.search(r'^sha256=([0-9a-f]{64})$',validation,re.M)
           size=re.search(r'^bytes=([0-9]+)$',validation,re.M)
-          if not match or not size or int(size.group(1))!=image.stat().st_size:
+          if not match or not size or int(size.group(1))!=report.get('bytes') or report.get('sha256')!=match.group(1):
               raise SystemExit('source artifact-download-validation report is incomplete or has wrong size')
-          import hashlib
-          digest=hashlib.sha256()
-          with image.open('rb') as stream:
-              for block in iter(lambda:stream.read(1024*1024),b''): digest.update(block)
-          if digest.hexdigest()!=match.group(1) or report.get('sha256')!=match.group(1) or report.get('bytes')!=image.stat().st_size:
-              raise SystemExit('downloaded raw IMG differs from its successful USB verification report')
+          if listed_metadata.get('size_in_bytes')!=report.get('bytes') or (listed_metadata.get('digest') and listed_metadata['digest']!=f"sha256:{match.group(1)}"):
+              raise SystemExit('raw artifact metadata size/digest differs from its USB verification report')
           provenance=root/'reports/provenance'
           required={'sources.lock.json','kernel-input-manifest.json','base-image.lock.json','system-image-verification.json','system-source-run.json'}
           missing=required-{p.name for p in provenance.iterdir() if p.is_file()}
           if missing or not (root/'reports/reference.lock.json').is_file():
               raise SystemExit(f'missing source provenance files: {sorted(missing)}')
-          print(f"verified {image.name}: {image.stat().st_size} bytes sha256={match.group(1)} artifact_id={artifact_id}")
+          Path(os.environ['RUNNER_TEMP']+'/expected-image.json').write_text(json.dumps({'name':image_name,'bytes':int(size.group(1)),'sha256':match.group(1),'artifact_id':artifact_id}))
+          print(f"validated source report for {image_name}: {int(size.group(1))} bytes sha256={match.group(1)} artifact_id={artifact_id}")
           with open(os.environ['GITHUB_ENV'],'a') as env:
-              env.write(f"IMAGE_NAME={image.name}\nIMAGE_SHA256={match.group(1)}\nUSB_RUN_ID={os.environ['USB_RUN_ID']}\n")
+              env.write(f"IMAGE_NAME={image_name}\nIMAGE_SHA256={match.group(1)}\nIMAGE_BYTES={int(size.group(1))}\nUSB_RUN_ID={os.environ['USB_RUN_ID']}\n")
           PY
+          image_artifact_id=$(cat "$RUNNER_TEMP/usb-image-artifact-id")
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$image_artifact_id/zip" > "$RUNNER_TEMP/raw-image-artifact-transfer.bin"
+          python3 scripts/deliver_image_zip.py extract-raw-artifact \
+            --transfer "$RUNNER_TEMP/raw-image-artifact-transfer.bin" \
+            --output "$RUNNER_TEMP/$IMAGE_NAME" \
+            --expected-name "$IMAGE_NAME" \
+            --expected-sha256 "$IMAGE_SHA256" \
+            --expected-bytes "$IMAGE_BYTES" | tee outputs/input/raw-artifact-download-validation.json
+          cp "$RUNNER_TEMP/$IMAGE_NAME" "outputs/input/$IMAGE_NAME"
 
       - name: Create a ZIP containing the raw IMG, checksum manifest, and reports
         id: package
