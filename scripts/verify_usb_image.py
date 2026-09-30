@@ -50,14 +50,13 @@ def verify_script_image(path: Path, command_path: Path) -> None:
     payload = verify_legacy_image(path)
     command = command_path.read_bytes()
     # mkimage's IH_TYPE_SCRIPT payload is a network-order length, a zero
-    # terminator, then the command bytes padded to the next four-byte boundary.
+    # terminator, then the exact bytes of the sole command file. U-Boot mkimage
+    # only pads non-final members of multi-file scripts, never the sole/final one.
     if len(payload) < 8:
         raise SystemExit(f"U-Boot script table is truncated: {path.name}")
     command_size, terminator = struct.unpack_from(">II", payload)
-    aligned_size = (command_size + 3) & ~3
-    if (terminator != 0 or len(payload) != 8 + aligned_size or
-            payload[8:8 + command_size] != command or
-            any(payload[8 + command_size:])):
+    if (terminator != 0 or command_size != len(command) or
+            len(payload) != 8 + command_size or payload[8:] != command):
         raise SystemExit(f"U-Boot script payload does not match readable source: {path.name}")
 
 

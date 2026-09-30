@@ -113,6 +113,37 @@ jobs:
           "$packer" -c "$RUNNER_TEMP/reference/W103D_Armbian_26.8.1_Server.img"
           echo "AMLPACKER=$packer" >> "$GITHUB_ENV"
 
+      - name: Exercise U-Boot script parser against runner mkimage
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import struct, subprocess, tempfile, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from scripts.verify_usb_image import verify_legacy_image, verify_script_image
+          with tempfile.TemporaryDirectory(prefix='w103d-mkimage-script-test-') as td:
+              root=Path(td)
+              for size in (1, 2, 3, 4):
+                  command=root/f'command-{size}.cmd'
+                  image=root/f'command-{size}.scr'
+                  content=bytes(range(size))
+                  command.write_bytes(content)
+                  subprocess.run(['mkimage','-A','arm','-T','script','-C','none','-n',f'test-{size}','-d',str(command),str(image)],check=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+                  payload=verify_legacy_image(image)
+                  if payload != struct.pack('>II',size,0)+content:
+                      raise SystemExit(f'mkimage payload framing differs for command size {size}: {payload.hex()}')
+                  verify_script_image(image,command)
+                  trailing=root/f'trailing-{size}.scr'
+                  trailing.write_bytes(image.read_bytes()+b'X')
+                  try:
+                      verify_script_image(trailing,command)
+                  except SystemExit:
+                      pass
+                  else:
+                      raise SystemExit('script verifier accepted trailing bytes')
+          print('runner mkimage script table/body/CRC/length checks passed for 1, 2, 3, 4-byte command bodies and rejected trailing data')
+          PY
+
       - name: Assemble new boot and root partitions and pack the Amlogic IMG
         run: |
           set -euo pipefail
@@ -161,6 +192,18 @@ jobs:
             --reference-layout config/reference-layout-lock.json \
             --packer "$AMLPACKER" --out outputs/verification-report.json
           sha256sum "$image" > outputs/SHA256SUMS
+
+      - name: Preserve unverified candidate after a failed assembly or verifier
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-usb-unverified-candidate-${{ github.run_id }}
+          path: |
+            outputs/*USB_Burning_Tool.img
+            outputs/assembly-input-report.json
+            outputs/provenance/**
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Upload the single raw USB Burning Tool IMG
         if: success()
