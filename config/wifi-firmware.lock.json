@@ -1,0 +1,18 @@
+{
+  "description": "MT7663 firmware installed into the W103D image. Extracted from the hash-locked reference package (config/reference.lock.json) by scripts/audit_reference_wifi.py; same bytes as pigeon2049 board/w103d/firmware/manifest.json. The Ophub base ships the 2020 N9 (d8b8488f...); it is replaced here.",
+  "install_dir": "usr/lib/firmware/mediatek",
+  "files": [
+    {
+      "name": "mt7663_n9_v3.bin",
+      "sha256": "223f73f17f0f986dc4e7167daa6eef14ffb41c713f22d70f9645eb049bdec80a",
+      "version": "7663mp1827 / 20210308205639",
+      "source": "W103D factory Android vendor/firmware/WIFI_RAM_CODE_MT7663.bin (unmodified), via reference package rootfs"
+    },
+    {
+      "name": "mt7663pr2h.bin",
+      "sha256": "534f2152f9b0f48dfcec9c1727b0bab9a3727a655d76d5ec818cc39a55602336",
+      "version": "7663e2ccn04-2006030247",
+      "source": "linux-firmware MT7663 update f39b68729aab3787b89c35bbbd76538e3edb13c4, via reference package rootfs"
+    }
+  ]
+}

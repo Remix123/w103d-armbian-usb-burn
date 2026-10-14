@@ -12,7 +12,6 @@ from typing import Callable
 APPROVED_WORKFLOWS = {
     ".github/workflows/reference-preflight.yml": "Reference image preflight",
     ".github/workflows/compile-kernel.yml": "Compile pinned Ophub W103D kernel",
-    ".github/workflows/recover-kernel-artifact.yml": "Recover and verify existing W103D kernel artifact",
     ".github/workflows/build-system.yml": "Rebuild W103D Trixie system with pinned Ophub kernel",
     ".github/workflows/build-usb-burn-image.yml": "Assemble and validate W103D USB Burning Tool image",
     ".github/workflows/deliver-zipped-image.yml": "Deliver validated W103D USB image as ZIP",

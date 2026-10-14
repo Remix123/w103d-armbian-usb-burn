@@ -1,0 +1,11 @@
+{
+  "description": "Patches applied to the locked ophub/linux-<series> kernel source before compilation. Applied with git apply after a --check pre-flight; any failure stops the build.",
+  "kernel_series": "6.18.y",
+  "patches": [
+    {
+      "path": "patches/w103d/mt7663s-w103d-v22.patch",
+      "sha256": "15cd9faec54e4548c0aec083ef5b0b8e63266835f5bfb2764c4709858ff00f8b",
+      "description": "mt76: mt7663s: W103D: own MAC via UNI DEV_INFO, JOIN grant handling (returned 4 s after association on 7663mp firmware so connected scans use the N9 online scan; held on older firmware), TXS rate attribution, REPORTS_TX_ACK_STATUS, firmware RX BA events in process context (v22, board-tested on 6.18.54-ophub with N9 7663mp1827 and 3.1.1)"
+    }
+  ]
+}

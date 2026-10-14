@@ -154,6 +154,34 @@ def ensure_uinitrd(source_boot: Path, source_initrd: Path, output: Path) -> byte
     return payload
 
 
+def install_wifi_firmware(root: Path, firmware_dir: Path, lock: dict) -> list[dict]:
+    """Install the hash-locked MT7663 firmware over the base image copies."""
+    target_dir = root / lock["install_dir"]
+    if not target_dir.is_dir():
+        raise SystemExit(f"rebuilt rootfs has no firmware directory /{lock['install_dir']}")
+    records = []
+    for entry in lock["files"]:
+        source = firmware_dir / entry["name"]
+        if not source.is_file() or hash_file(source) != entry["sha256"]:
+            raise SystemExit(f"Wi-Fi firmware input {entry['name']} is missing or differs from config/wifi-firmware.lock.json")
+        target = target_dir / entry["name"]
+        previous = None
+        if target.is_symlink() or target.exists():
+            previous = hash_file(target.resolve()) if target.resolve().is_file() else "dangling"
+            target.unlink()
+        for compressed in (".zst", ".xz", ".gz"):
+            # A compressed copy would be loaded instead of the plain file; there must not be one.
+            target.with_name(target.name + compressed).unlink(missing_ok=True)
+        shutil.copyfile(source, target)
+        target.chmod(0o644)
+        if hash_file(target) != entry["sha256"]:
+            raise SystemExit(f"installed Wi-Fi firmware readback mismatch: {entry['name']}")
+        records.append({"path": "/" + (Path(lock["install_dir"]) / entry["name"]).as_posix(),
+                        "sha256": entry["sha256"], "version": entry["version"],
+                        "replaced_sha256": previous})
+    return records
+
+
 def gunzip_sparse(source: Path, target: Path) -> int:
     logical = 0
     with gzip.open(source, "rb") as inp, target.open("xb") as out:
@@ -177,11 +205,13 @@ def main() -> int:
     ap.add_argument("--base-image-lock", type=Path, required=True)
     ap.add_argument("--ophub-boot-emmc", type=Path, required=True)
     ap.add_argument("--packer", type=Path, required=True)
+    ap.add_argument("--wifi-firmware-dir", type=Path, required=True,
+                    help="directory with the firmware files listed in config/wifi-firmware.lock.json")
     ap.add_argument("--work", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
     a = ap.parse_args()
     for p in (a.reference_dir, a.system_image, a.system_report, a.kernel_archive, a.kernel_manifest,
-              a.sources_lock, a.base_image_lock, a.ophub_boot_emmc, a.packer):
+              a.sources_lock, a.base_image_lock, a.ophub_boot_emmc, a.packer, a.wifi_firmware_dir):
         if not p.exists():
             raise SystemExit(f"required input does not exist: {p}")
     output_template = a.output.as_posix()
@@ -272,6 +302,8 @@ def main() -> int:
         run("rsync", "-aHAX", "--numeric-ids", "--exclude=/boot/*", f"{source_root}/", f"{root_mount}/", capture=False)
         if shutil.disk_usage(root_mount).used > (4 << 30) * 0.92:
             raise SystemExit("rebuilt root filesystem payload leaves insufficient ext4 reserve")
+        wifi_lock = json.loads(Path("config/wifi-firmware.lock.json").read_text())
+        wifi_firmware = install_wifi_firmware(root_mount, a.wifi_firmware_dir, wifi_lock)
         fstab = root_mount / "etc/fstab"
         fstab.write_text("LABEL=W103D_ROOT / ext4 defaults,noatime,nodiratime,errors=remount-ro 0 1\nLABEL=W103D_BOOT /boot vfat defaults 0 2\ntmpfs /tmp tmpfs defaults,nosuid 0 0\n")
         (root_mount / "root/.no_rootfs_resize").write_text("no\n")
@@ -421,7 +453,8 @@ def main() -> int:
         "reference_zip_image_sha256": json.loads(Path("config/reference.lock.json").read_text())["image_sha256"],
         "reference_component_sha256": {name: hash_file(reference / name) for name in VENDOR_COMPONENTS},
         "system_input_sha256": hash_file(a.system_image), "kernel_archive_sha256": hash_file(a.kernel_archive),
-        "kernel_release": release, "layout": {"boot_bytes": boot_raw.stat().st_size, "root_bytes": root_raw.stat().st_size,
+        "kernel_release": release, "wifi_firmware": wifi_firmware,
+        "kernel_patches": source_lock.get("kernel_patches", []), "layout": {"boot_bytes": boot_raw.stat().st_size, "root_bytes": root_raw.stat().st_size,
             "boot_label": "W103D_BOOT", "root_label": "W103D_ROOT", "root_uuid": "01b94932-6a4a-4c81-9a71-20bd55b675a8"},
         "armbian_version": armbian_version,
         "armbian_release": armbian_fields,

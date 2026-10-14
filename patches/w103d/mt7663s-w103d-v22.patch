@@ -1,0 +1,748 @@
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
+index 9090b95a6..46fdbfb53 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
+@@ -54,8 +54,13 @@ struct mt7663s_w103d_intr_state {
+ 	bool eeprom_settle_pending;
+ 	bool suppress_noack_completion;
+ 	bool join_privilege_held;
++	/* Returns the JOIN grant once the link is up (gen4m JOIN timer). */
++	struct delayed_work join_release_work;
+ 	atomic_t irq_queued;
+ 	struct delayed_work quota_work;
++	/* Firmware RX ADDBA/DELBA events, handled in process context. */
++	struct sk_buff_head ba_events;
++	struct work_struct ba_work;
+ 	struct mt76_dev *mdev;
+ };
+ 
+@@ -67,6 +72,9 @@ struct mt7663s_w103d_poll {
+ };
+ 
+ /* Read-only evidence of RX-tail completion delivery, reset on module load. */
++/* gen4m AIS_JOIN_CH_REQUEST_INTERVAL: grant kept for EAPOL and DHCP. */
++#define W103D_JOIN_HOLD_MS	4000
++
+ static unsigned long rx_enhance_reads;
+ static unsigned long rx_enhance_tx_reports;
+ static unsigned long rx_enhance_pse;
+@@ -95,6 +103,8 @@ mt7663s_w103d_intr_state(struct mt76_dev *mdev)
+ }
+ 
+ static void mt7663s_w103d_quota_work(struct work_struct *work);
++static void mt7663s_w103d_ba_work(struct work_struct *work);
++static void mt7663s_w103d_join_release_work(struct work_struct *work);
+ 
+ int mt7663s_w103d_init_intr(struct mt76_dev *mdev)
+ {
+@@ -108,6 +118,10 @@ int mt7663s_w103d_init_intr(struct mt76_dev *mdev)
+ 	atomic_set(&state->irq_queued, 0);
+ 	state->mdev = mdev;
+ 	INIT_DELAYED_WORK(&state->quota_work, mt7663s_w103d_quota_work);
++	skb_queue_head_init(&state->ba_events);
++	INIT_WORK(&state->ba_work, mt7663s_w103d_ba_work);
++	INIT_DELAYED_WORK(&state->join_release_work,
++			  mt7663s_w103d_join_release_work);
+ 	mdev->sdio.intr_data = state;
+ 
+ 	dev_dbg(mdev->dev,
+@@ -524,6 +538,9 @@ void mt7663s_w103d_deinit_intr(struct mt76_dev *mdev)
+ 	spin_unlock_irqrestore(&state->lock, flags);
+ 	/* Never wait under state->lock: a running callback can wake a producer. */
+ 	cancel_delayed_work_sync(&state->quota_work);
++	cancel_work_sync(&state->ba_work);
++	skb_queue_purge(&state->ba_events);
++	cancel_delayed_work_sync(&state->join_release_work);
+ }
+ 
+ static bool mt7663s_w103d_tx_quota_empty(struct mt76_dev *mdev)
+@@ -893,12 +910,59 @@ static void mt7663s_w103d_complete_no_ack(struct mt76_dev *mdev, int cmd,
+ 	mt76_mcu_rx_event(mdev, skb);
+ }
+ 
++/* The MT7663 V3 offload firmware only programs the own MAC address (OMAC)
++ * of a BSS from the unified DEV_INFO command; mt7615 uses it for this
++ * firmware in uni_update_ops (mt76_connac_mcu_uni_add_dev()).  The extended
++ * DEV_INFO_UPDATE sent by the legacy W103D path is accepted but leaves OMAC
++ * unset: the MAC never treats frames to our address as unicast-to-me, so it
++ * neither ACKs them nor recognizes the AP's ACKs.  The AP then retransmits
++ * every unicast frame (EAPOL M1/M3, DHCP replies) until its retry limit,
++ * 2.4 GHz traffic (no A-MPDU from the AP) stalls for seconds after each
++ * connect, and every TXS reports ACK_TIMEOUT.  Send the unified request as
++ * well; like the other UNI SET commands it is fire-and-forget here.
++ */
++static int mt7663s_w103d_uni_dev_info(struct mt7615_phy *phy,
++				      struct ieee80211_vif *vif, bool enable)
++{
++	struct mt7615_vif *mvif = (struct mt7615_vif *)vif->drv_priv;
++	struct {
++		struct {
++			u8 omac_idx;
++			u8 band_idx;
++			__le16 pad;
++		} __packed hdr;
++		struct {
++			__le16 tag;
++			__le16 len;
++			u8 active;
++			u8 link_idx;
++			u8 omac_addr[ETH_ALEN];
++		} __packed tlv;
++	} __packed req = {
++		.hdr = {
++			.omac_idx = mvif->mt76.omac_idx,
++			.band_idx = mvif->mt76.band_idx,
++		},
++		.tlv = {
++			.tag = cpu_to_le16(DEV_INFO_ACTIVE),
++			.len = cpu_to_le16(sizeof(req.tlv)),
++			.active = enable,
++			.link_idx = mvif->mt76.link_idx,
++		},
++	};
++
++	memcpy(req.tlv.omac_addr, vif->addr, ETH_ALEN);
++	return mt76_mcu_send_msg(&phy->dev->mt76, MCU_UNI_CMD(DEV_INFO_UPDATE),
++				 &req, sizeof(req), true);
++}
++
+ static int mt7663s_w103d_add_dev_info(struct mt7615_phy *phy,
+ 					      struct ieee80211_vif *vif,
+ 					      bool enable)
+ {
+ 	struct mt7615_vif *mvif = (struct mt7615_vif *)vif->drv_priv;
+ 	struct mt7615_dev *dev = phy->dev;
++	int ret;
+ 	struct {
+ 		struct {
+ 			u8 omac_idx;
+@@ -930,8 +994,14 @@ static int mt7663s_w103d_add_dev_info(struct mt7615_phy *phy,
+ 	};
+ 
+ 	memcpy(data.tlv.omac_addr, vif->addr, ETH_ALEN);
+-	return mt76_mcu_send_msg(&dev->mt76, MCU_EXT_CMD(DEV_INFO_UPDATE),
+-				 &data, sizeof(data), true);
++	if (!enable)
++		mt7663s_w103d_uni_dev_info(phy, vif, false);
++	ret = mt76_mcu_send_msg(&dev->mt76, MCU_EXT_CMD(DEV_INFO_UPDATE),
++				&data, sizeof(data), true);
++	if (enable && !ret)
++		ret = mt7663s_w103d_uni_dev_info(phy, vif, true);
++
++	return ret;
+ }
+ 
+ static int mt7663s_w103d_add_bss_info(struct mt7615_phy *phy,
+@@ -1284,6 +1354,25 @@ void mt7663s_w103d_install_legacy_ops(struct mt7615_mcu_ops *ops)
+ 	ops->set_sta_decap_offload = mt7663s_w103d_sta_update_hdr_trans;
+ }
+ 
++#define W103D_RFCR1	(MT_WF_RFCR1_DROP_ACK | MT_WF_RFCR1_DROP_BF_POLL | \
++			 MT_WF_RFCR1_DROP_CFEND | MT_WF_RFCR1_DROP_CFACK)
++
++/* Program the host RX filter from phy->rxfilter.  The N9 firmware rewrites
++ * RFCR itself when it tears down an associated BSS (BSS_INFO off /
++ * REMOVE_STA_RECORD on disassociation) and leaves it dropping unicast
++ * management frames addressed to us: every following Authentication
++ * response is discarded and auth times out on all APs until something
++ * reprograms the filter (e.g. a promisc/allmulti change, which is why
++ * running tcpdump "fixes" it).  mt7615 itself only writes RFCR from
++ * configure_filter/config, so re-apply it at the points where the firmware
++ * may have changed it.
++ */
++static void mt7663s_w103d_apply_rx_filter(struct mt7615_dev *dev)
++{
++	mt7663s_w103d_reg_wr(&dev->mt76, 0x820f5000, dev->phy.rxfilter);
++	mt7663s_w103d_reg_wr(&dev->mt76, 0x820f5004, W103D_RFCR1);
++}
++
+ void mt7663s_w103d_configure_filter(struct ieee80211_hw *hw,
+ 				    unsigned int changed_flags,
+ 				    unsigned int *total_flags,
+@@ -1295,10 +1384,6 @@ void mt7663s_w103d_configure_filter(struct ieee80211_hw *hw,
+ 		FIF_FCSFAIL | FIF_CONTROL | FIF_BCN_PRBRESP_PROMISC |
+ 		FIF_PROBE_REQ;
+ 	u32 rfcr = 0;
+-	u32 rfcr1 = MT_WF_RFCR1_DROP_ACK |
+-		MT_WF_RFCR1_DROP_BF_POLL |
+-		MT_WF_RFCR1_DROP_CFEND |
+-		MT_WF_RFCR1_DROP_CFACK;
+ 
+ 	/* V64 used the normal host RFCR path.  Do not send SET_RX_FILTER here:
+ 	 * its NDIS-style data packet mask excludes management traffic on this
+@@ -1317,8 +1402,7 @@ void mt7663s_w103d_configure_filter(struct ieee80211_hw *hw,
+ 	 * makes every successful ADDBA response disappear before SDIO.  Preserve
+ 	 * the other low-value control filters but explicitly admit BA traffic.
+ 	 */
+-	mt7663s_w103d_reg_wr(&dev->mt76, 0x820f5000, rfcr);
+-	mt7663s_w103d_reg_wr(&dev->mt76, 0x820f5004, rfcr1);
++	mt7663s_w103d_apply_rx_filter(dev);
+ }
+ 
+ /* gen4m CMD_SET_BSS_RLM_PARAM, including its natural tail padding.  The
+@@ -1401,6 +1485,24 @@ mt7663s_w103d_sync_bss_rlm(struct mt7615_dev *dev,
+ 		&req, sizeof(req), false);
+ }
+ 
++static void mt7663s_w103d_apply_rx_filter(struct mt7615_dev *dev);
++static int mt7663s_w103d_channel_privilege(struct mt7615_dev *dev,
++					   struct cfg80211_chan_def *chandef,
++					   bool request);
++
++/* Whether the N9 firmware keeps the associated BSS on its channel after the
++ * JOIN grant is returned.  The 2021 MP firmware (fw_ver "7663mp1827") does,
++ * and its CNM then schedules online scans.  The 2020 firmware (fw_ver
++ * "3.1.1", build 20200604161656) stops receiving unicast for the BSS as soon
++ * as the grant is aborted, so on it - and on any firmware not verified - the
++ * grant stays held for the whole association and connected scans use the
++ * mac80211 software scan, which that firmware serves correctly.
++ */
++static bool mt7663s_w103d_join_release_ok(struct mt7615_dev *dev)
++{
++	return !strncmp(dev->mt76.hw->wiphy->fw_version, "7663mp", 6);
++}
++
+ void mt7663s_w103d_note_assoc(struct ieee80211_hw *hw,
+ 			      struct ieee80211_vif *vif, u64 changed)
+ {
+@@ -1420,10 +1522,30 @@ void mt7663s_w103d_note_assoc(struct ieee80211_hw *hw,
+ 				 "W103D: failed to sync BSS channel: %d\n", ret);
+ 	}
+ 
++	/* mgd_prepare_tx() acquired the JOIN grant on either band.  Keep it
++	 * through the 4-way handshake and DHCP, then return it (see
++	 * mt7663s_w103d_join_release_work()); release it at once on
++	 * disassociation.
++	 */
+ 	if (state && (changed & BSS_CHANGED_ASSOC) && vif->cfg.assoc &&
+-	    mphy->chandef.chan &&
+-	    mphy->chandef.chan->band == NL80211_BAND_5GHZ)
++	    mphy->chandef.chan) {
+ 		WRITE_ONCE(state->join_privilege_held, true);
++		if (mt7663s_w103d_join_release_ok(dev))
++			mod_delayed_work(dev->mt76.wq,
++					 &state->join_release_work,
++					 msecs_to_jiffies(W103D_JOIN_HOLD_MS));
++	} else if (state && (changed & BSS_CHANGED_ASSOC) && !vif->cfg.assoc) {
++		cancel_delayed_work(&state->join_release_work);
++		if (xchg(&state->join_privilege_held, false))
++			mt7663s_w103d_channel_privilege(dev, &mphy->chandef,
++						       false);
++	}
++
++	/* The STA/BSS records were just torn down; undo the firmware's RFCR
++	 * change so the next Authentication response is accepted.
++	 */
++	if ((changed & BSS_CHANGED_ASSOC) && !vif->cfg.assoc)
++		mt7663s_w103d_apply_rx_filter(dev);
+ }
+ 
+ static int mt7663s_w103d_channel_privilege(struct mt7615_dev *dev,
+@@ -1443,6 +1565,21 @@ int mt7663s_w103d_hw_scan(struct ieee80211_hw *hw,
+ 	if (!mt7615_firmware_offload(dev))
+ 		return 1;
+ 
++	/* While associated, scan with the N9 online scan: its CNM leaves the
++	 * home channel and returns to it.  mac80211's software scan is not an
++	 * alternative: with the station connected the 2021 N9 firmware
++	 * (7663mp1827) forwards no beacon or probe response to the host, so
++	 * it finds nothing although the radio visits every channel.  The JOIN
++	 * grant pins the scan engine to the home channel; right after
++	 * association it still protects the 4-way handshake and DHCP, so defer
++	 * the request as gen4m does (aisFsmScanRequest() pends a scan while
++	 * its JOIN timer runs) - cfg80211 users retry on -EBUSY.  Firmware
++	 * that needs the grant for the whole association keeps it, and its
++	 * connected scans stay software scans (mt7663s_w103d_join_release_ok()).
++	 */
++	if (vif->cfg.assoc && state && READ_ONCE(state->join_privilege_held))
++		return mt7663s_w103d_join_release_ok(dev) ? -EBUSY : 1;
++
+ 	/* Ensure the N9 scan scheduler knows the associated home channel before
+ 	 * releasing the JOIN privilege.  Refuse the scan if synchronization fails.
+ 	 */
+@@ -1567,7 +1704,7 @@ static int mt7663s_w103d_channel_privilege(struct mt7615_dev *dev,
+ 		if (chandef->width == NL80211_CHAN_WIDTH_40)
+ 			privilege.rf_sco = chandef->center_freq1 >
+ 					   chandef->chan->center_freq ? 1 : 3;
+-		privilege.rf_band = 2;
++		privilege.rf_band = chandef->chan->band == NL80211_BAND_2GHZ ? 1 : 2;
+ 		privilege.rf_width = chandef->width == NL80211_CHAN_WIDTH_80;
+ 		privilege.center_seg1 = ieee80211_frequency_to_channel(
+ 			chandef->center_freq1);
+@@ -1579,10 +1716,37 @@ static int mt7663s_w103d_channel_privilege(struct mt7615_dev *dev,
+ 				 sizeof(privilege), false);
+ }
+ 
++/* Request the JOIN channel privilege and wait for the firmware grant
++ * (MCU_EVENT_ROC, handled by mt7615_mcu_roc_event(), which sets roc_grant).
++ * Same pattern as mt7615_remain_on_channel() / mt7921_set_roc().
++ */
++static int mt7663s_w103d_request_join(struct mt7615_dev *dev,
++				      struct cfg80211_chan_def *chandef)
++{
++	int ret;
++
++	dev->phy.roc_grant = false;
++	ret = mt7663s_w103d_channel_privilege(dev, chandef, true);
++	if (ret)
++		return ret;
++
++	if (!wait_event_timeout(dev->phy.roc_wait, dev->phy.roc_grant, HZ)) {
++		dev_warn(dev->mt76.dev,
++			 "W103D: no channel grant for channel %u\n",
++			 chandef->chan->hw_value);
++		mt7663s_w103d_channel_privilege(dev, chandef, false);
++		return -ETIMEDOUT;
++	}
++
++	return 0;
++}
++
+ int mt7663s_w103d_set_channel(struct mt76_phy *mphy)
+ {
+ 	struct mt7615_phy *phy = mphy->priv;
+ 	struct mt7615_dev *dev = phy->dev;
++	struct mt7663s_w103d_intr_state *state =
++		mt7663s_w103d_intr_state(&dev->mt76);
+ 	struct cfg80211_chan_def *chandef = &mphy->chandef;
+ 	bool use_privilege;
+ 	int ret;
+@@ -1590,8 +1754,14 @@ int mt7663s_w103d_set_channel(struct mt76_phy *mphy)
+ 	if (!mt7663s_w103d_active() || !chandef->chan)
+ 		return mt7615_set_channel(mphy);
+ 
++	/* While the JOIN privilege is held (from auth until shortly after
++	 * association, or for the whole association on firmware that needs it),
++	 * only switch the RF channel: aborting and re-requesting it loses the
++	 * handshake, or on such firmware unicast for the BSS.
++	 */
+ 	use_privilege = chandef->chan->band == NL80211_BAND_5GHZ &&
+-			!mphy->offchannel;
++			!mphy->offchannel &&
++			!(state && READ_ONCE(state->join_privilege_held));
+ 	if (use_privilege)
+ 		mt7663s_w103d_channel_privilege(dev, chandef, false);
+ 
+@@ -1607,11 +1777,89 @@ int mt7663s_w103d_set_channel(struct mt76_phy *mphy)
+ 	if (!use_privilege)
+ 		return 0;
+ 
+-	ret = mt7663s_w103d_channel_privilege(dev, chandef, true);
+-	if (!ret)
+-		msleep(100);
++	return mt7663s_w103d_request_join(dev, chandef);
++}
+ 
+-	return ret;
++/* mac80211 calls mgd_prepare_tx() before every auth/assoc frame and
++ * mgd_complete_tx() when the exchange ends.  mt7921 uses these hooks to
++ * acquire a firmware JOIN channel grant (ROC, req_type JOIN) before sending
++ * auth, as the vendor gen4m AIS state machine does.  The W103D path only
++ * requested the privilege from set_channel(), and only on 5 GHz: a
++ * reconnect to the same channel never calls set_channel(), and 2.4 GHz never
++ * requested it, so auth frames were queued without a channel grant and
++ * timed out until something else happened to move the radio.
++ */
++void mt7663s_w103d_mgd_prepare_tx(struct ieee80211_hw *hw,
++				  struct ieee80211_vif *vif,
++				  struct ieee80211_prep_tx_info *info)
++{
++	struct mt7615_dev *dev = mt7615_hw_dev(hw);
++	struct mt7663s_w103d_intr_state *state =
++		mt7663s_w103d_intr_state(&dev->mt76);
++	struct cfg80211_chan_def chandef = dev->mphy.chandef;
++
++	if (!state || vif->cfg.assoc || !chandef.chan)
++		return;
++
++	mt7615_mutex_acquire(dev);
++	mt7663s_w103d_apply_rx_filter(dev);
++	/* Request the grant on both bands, as mt7921 and the gen4m AIS FSM do.
++	 * Besides owning the channel, the grant is what preempts the N9 offload
++	 * scan: cancel_hw_scan() only completes the host request (a firmware
++	 * CANCEL poisons the next scan), so a scan started just before connect
++	 * keeps hopping channels for ~3 s.  Without the grant on 2.4 GHz the
++	 * radio left the home channel between EAPOL M2 and M3 and the 4-way
++	 * handshake timed out.  (An earlier observation that a 2.4 GHz grant
++	 * stops unicast was made with rf_band fixed to 5 GHz and the own MAC
++	 * address unprogrammed; it does not reproduce with both fixed.)
++	 */
++	if (!READ_ONCE(state->join_privilege_held) &&
++	    !mt7663s_w103d_request_join(dev, &chandef))
++		WRITE_ONCE(state->join_privilege_held, true);
++	mt7615_mutex_release(dev);
++}
++
++void mt7663s_w103d_mgd_complete_tx(struct ieee80211_hw *hw,
++				   struct ieee80211_vif *vif,
++				   struct ieee80211_prep_tx_info *info)
++{
++	struct mt7615_dev *dev = mt7615_hw_dev(hw);
++	struct mt7663s_w103d_intr_state *state =
++		mt7663s_w103d_intr_state(&dev->mt76);
++
++	/* Keep the grant across auth -> assoc; once associated it is returned
++	 * by mt7663s_w103d_join_release_work() or on disassociation.
++	 */
++	if (!state || info->success || vif->cfg.assoc)
++		return;
++
++	if (xchg(&state->join_privilege_held, false)) {
++		mt7615_mutex_acquire(dev);
++		mt7663s_w103d_channel_privilege(dev, &dev->mphy.chandef, false);
++		mt7615_mutex_release(dev);
++	}
++}
++
++/* The JOIN grant is only needed until the link is usable.  The vendor gen4m
++ * AIS FSM arms a JOIN timer when the grant arrives (AIS_JOIN_CH_REQUEST_
++ * INTERVAL, 4 s) and returns the grant in NORMAL_TR when it expires or DHCP
++ * completes (aisFsmRunEventJoinTimeout(), qmReleaseCHAtFinishedDhcp());
++ * mt7921 aborts its JOIN ROC in mgd_complete_tx().  Holding it for the whole
++ * association pins every later N9 online scan to the home channel, while
++ * the firmware keeps the associated BSS on its channel without it.
++ */
++static void mt7663s_w103d_join_release_work(struct work_struct *work)
++{
++	struct mt7663s_w103d_intr_state *state =
++		container_of(to_delayed_work(work),
++			     struct mt7663s_w103d_intr_state, join_release_work);
++	struct mt7615_dev *dev = container_of(state->mdev, struct mt7615_dev,
++					      mt76);
++
++	mt7615_mutex_acquire(dev);
++	if (xchg(&state->join_privilege_held, false) && dev->mphy.chandef.chan)
++		mt7663s_w103d_channel_privilege(dev, &dev->mphy.chandef, false);
++	mt7615_mutex_release(dev);
+ }
+ 
+ /* Determine whether a command should wait for a firmware response.
+@@ -1742,10 +1990,12 @@ mt7663s_w103d_tx_rate_val(struct mt76_phy *mphy,
+ 			*bw = 1;
+ 	} else {
+ 		const struct ieee80211_rate *legacy;
++		enum nl80211_band band = NL80211_BAND_5GHZ;
+ 		u16 val;
+ 
+-		legacy = &mphy->hw->wiphy->bands[NL80211_BAND_5GHZ]
+-					->bitrates[rate->idx];
++		if (mphy->chandef.chan)
++			band = mphy->chandef.chan->band;
++		legacy = &mphy->hw->wiphy->bands[band]->bitrates[rate->idx];
+ 		val = rate->flags & IEEE80211_TX_RC_USE_SHORT_PREAMBLE ?
+ 			legacy->hw_value_short : legacy->hw_value;
+ 		nss = 1;
+@@ -1782,7 +2032,8 @@ mt7663s_w103d_fix_5g_tx_rate(struct mt7615_dev *dev,
+ 		 * frame.  Overriding it with minstrel's data rate/retry count can
+ 		 * exhaust the connection probes and cause a local reason=4 drop.
+ 		 * Management/control/Null traffic cannot use the inaccessible WTBL
+-		 * rate table either.  Index 0 is mandatory 6 Mbps OFDM on 5 GHz.
++		 * rate table either.  Index 0 is the lowest mandatory rate of the
++		 * current band (6 Mbps OFDM on 5 GHz, 1 Mbps CCK on 2.4 GHz).
+ 		 */
+ 		rate.idx = 0;
+ 		rate.count = 8;
+@@ -1801,13 +2052,25 @@ mt7663s_w103d_fix_5g_tx_rate(struct mt7615_dev *dev,
+ 		rcu_read_unlock();
+ 	}
+ 
+-	/* Before minstrel publishes a table, use mandatory 6 Mbps OFDM. */
++	/* Before minstrel publishes a table, use the band's lowest basic rate. */
+ 	if (rate.idx < 0 || !rate.count) {
+ 		rate.idx = 0;
+ 		rate.count = 8;
+ 		rate.flags = 0;
+ 	}
+ 
++	/* mt7615_fill_txs() reports a fixed-rate TXS against status.rates[0],
++	 * which aliases control.rates[0]: it takes MCS/NSS from the hardware
++	 * but bandwidth and guard interval from this entry.  With the rate
++	 * table (SUPPORTS_RC_TABLE) mac80211 leaves it empty for normal data,
++	 * so minstrel credited every result to the 20 MHz long-GI group and
++	 * never backed off a failing 40 MHz short-GI rate (5 GHz VHT-MCS9 at
++	 * ~30% TX failure).  Record the rate written to the descriptor, as the
++	 * mt7615 rate-probe path does.
++	 */
++	info->control.rates[0] = rate;
++	info->control.rates[1].idx = -1;
++
+ 	rateval = mt7663s_w103d_tx_rate_val(&dev->mphy, &rate,
+ 					    info->flags & IEEE80211_TX_CTL_STBC,
+ 					    &bw);
+@@ -1860,8 +2123,13 @@ int mt7663s_w103d_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
+ 
+ 	ret = mt7663_usb_sdio_tx_prepare_skb(mdev, txwi_ptr, qid, wcid, sta,
+ 					     tx_info);
+-	if (ret || !sta || !dev->mphy.chandef.chan ||
+-	    dev->mphy.chandef.chan->band != NL80211_BAND_5GHZ)
++	/* The WTBL rate table is unreachable on both bands (blocked 0x82xxxxxx
++	 * window), so the descriptor rate fixup must not be limited to 5 GHz:
++	 * after a 5 GHz session the WTBL still holds that session's VHT rate
++	 * and every 2.4 GHz data frame is sent at a rate the AP cannot decode
++	 * (auth/EAPOL pass at basic rate, DHCP/ARP never do).
++	 */
++	if (ret || !sta || !dev->mphy.chandef.chan)
+ 		return ret;
+ 
+ 	/* The shared SDIO rate worker writes the WTBL rate table through blocked
+@@ -2167,6 +2435,86 @@ static u8 mt7663s_w103d_extract_frame_channel(const void *data, int len)
+ 	return 0;
+ }
+ 
++/* TX status for frames mac80211 did not ask to track (pid NO_SKB) is
++ * reported by mt7615_mac_add_txs() from a zeroed ieee80211_tx_info.  For a
++ * fixed-rate TXS, mt7615_fill_txs() then takes MCS/NSS from the hardware but
++ * bandwidth and guard interval from that empty entry, so minstrel credits
++ * every untracked data frame to the 20 MHz long-GI group of the MCS.  On
++ * W103D every data frame is fixed-rate (WTBL rate table unreachable), and
++ * once the own MAC address is programmed the TXS ACK status is real: a
++ * failing 40 MHz short-GI rate was never penalised and the link stayed at
++ * VHT-MCS9 with ~30% TX failure and bursts of ping loss.  The descriptor
++ * rate is the first entry of sta->rates (see fix_5g_tx_rate); report these
++ * records with that entry's flags and keep them away from mt7615.
++ */
++static void mt7663s_w103d_txs_noskb(struct mt7615_dev *dev, __le32 *txs)
++{
++	u32 w0 = le32_to_cpu(txs[0]);
++	u32 rate = FIELD_GET(MT_TXS0_TX_RATE, w0);
++	u8 pid = FIELD_GET(MT_TXS0_PID, w0);
++	u8 wcidx = le32_get_bits(txs[2], MT_TXS2_WCID);
++	struct ieee80211_tx_info info = {};
++	struct ieee80211_sta_rates *rates;
++	struct ieee80211_tx_rate *r = &info.status.rates[0];
++	struct ieee80211_sta *sta;
++	struct mt76_wcid *wcid;
++	u8 mode = FIELD_GET(MT_TX_RATE_MODE, rate);
++	u8 idx = FIELD_GET(MT_TX_RATE_IDX, rate);
++	u8 nss = FIELD_GET(MT_TX_RATE_NSS, rate);
++
++	if (pid != MT_PACKET_ID_NO_SKB || !(w0 & MT_TXS0_FIXED_RATE) ||
++	    (w0 & MT_TXS0_QUEUE_TIMEOUT) || wcidx >= MT7615_WTBL_STA)
++		return;
++
++	if (mode == MT_PHY_TYPE_VHT) {
++		if ((rate & MT_TX_RATE_STBC) && nss)
++			nss--;
++		r->idx = idx | (nss << 4);
++		r->flags = IEEE80211_TX_RC_VHT_MCS;
++	} else if (mode == MT_PHY_TYPE_HT || mode == MT_PHY_TYPE_HT_GF) {
++		if (idx > 31)
++			return;
++		r->idx = idx;
++		r->flags = IEEE80211_TX_RC_MCS;
++	} else {
++		/* Legacy: mt7615 already reports these correctly. */
++		return;
++	}
++
++	rcu_read_lock();
++	wcid = mt76_wcid_ptr(dev, wcidx);
++	sta = wcid ? wcid_to_sta(wcid) : NULL;
++	if (!sta)
++		goto out;
++
++	rates = rcu_dereference(sta->rates);
++	if (rates && rates->rate[0].idx == r->idx &&
++	    (rates->rate[0].flags & (IEEE80211_TX_RC_MCS |
++				     IEEE80211_TX_RC_VHT_MCS)) == r->flags)
++		r->flags = rates->rate[0].flags;
++
++	r->count = max_t(u8, FIELD_GET(MT_TXS3_TX_COUNT,
++				       le32_to_cpu(txs[3])), 1);
++	info.status.rates[1].idx = -1;
++	if (!(w0 & MT_TXS0_ACK_TIMEOUT))
++		info.flags |= IEEE80211_TX_STAT_ACK;
++	info.status.ampdu_len = 1;
++	info.status.ampdu_ack_len = !!(info.flags & IEEE80211_TX_STAT_ACK);
++	if (le32_to_cpu(txs[1]) & MT_TXS1_AMPDU)
++		info.flags |= IEEE80211_TX_STAT_AMPDU | IEEE80211_TX_CTL_AMPDU;
++
++	mt76_wcid_add_poll(&dev->mt76, wcid);
++	spin_lock_bh(&dev->mt76.rx_lock);
++	ieee80211_tx_status_noskb(dev->mt76.hw, sta, &info);
++	spin_unlock_bh(&dev->mt76.rx_lock);
++
++	/* Handled: make mt7615_mac_add_txs() skip the record. */
++	txs[0] = cpu_to_le32((w0 & ~MT_TXS0_PID) |
++			     FIELD_PREP(MT_TXS0_PID, MT_PACKET_ID_NO_ACK));
++out:
++	rcu_read_unlock();
++}
++
+ bool mt7663s_w103d_rx_check(struct mt76_dev *mdev, void *data, int len)
+ {
+ 	struct mt7615_dev *dev = container_of(mdev, struct mt7615_dev, mt76);
+@@ -2180,6 +2528,14 @@ bool mt7663s_w103d_rx_check(struct mt76_dev *mdev, void *data, int len)
+ 	rxd1 = le32_to_cpu(rxd[1]);
+ 	type = FIELD_GET(MT_RXD0_PKT_TYPE, rxd0);
+ 
++	if (mt7663s_w103d_active() && type == PKT_TYPE_TXS) {
++		__le32 *end = (__le32 *)((u8 *)data + len);
++		__le32 *txs;
++
++		for (txs = rxd + 1; txs + 7 <= end; txs += 7)
++			mt7663s_w103d_txs_noskb(dev, txs);
++	}
++
+ 	if (mt7663s_w103d_active() && type == PKT_TYPE_TXRX_NOTIFY) {
+ 		dev_dbg(mdev->dev,
+ 			      "W103D: ignoring SDIO TXRX_NOTIFY without tx_cleanup\n");
+@@ -2234,23 +2590,32 @@ struct mt7663s_w103d_rx_delba_event {
+ 	u8 reserved[2];
+ } __packed;
+ 
+-static bool
+-mt7663s_w103d_handle_rx_ba_event(struct mt76_dev *mdev, struct sk_buff *skb)
++static bool mt7663s_w103d_is_rx_ba_event(struct sk_buff *skb)
+ {
+ 	struct mt7615_mcu_rxd *rxd;
+-	struct mt76_wcid *wcid;
+-	u8 wcid_idx, tid;
+-	int ret = 0;
+ 
+ 	if (skb->len < sizeof(*rxd))
+ 		return false;
+ 
+ 	rxd = (struct mt7615_mcu_rxd *)skb->data;
+-	if (le32_get_bits(rxd->rxd[0], MT_RXD0_PKT_TYPE) !=
+-	    PKT_TYPE_RX_EVENT || rxd->seq ||
+-	    (rxd->eid != W103D_MCU_EVENT_RX_ADDBA &&
+-	     rxd->eid != W103D_MCU_EVENT_RX_DELBA))
+-		return false;
++	return le32_get_bits(rxd->rxd[0], MT_RXD0_PKT_TYPE) == PKT_TYPE_RX_EVENT &&
++	       !rxd->seq &&
++	       (rxd->eid == W103D_MCU_EVENT_RX_ADDBA ||
++		rxd->eid == W103D_MCU_EVENT_RX_DELBA);
++}
++
++/* Runs in process context with mdev->mutex held: mt76_rx_aggr_start()
++ * allocates with GFP_KERNEL and the WCID table is protected by the mutex.
++ */
++static void
++mt7663s_w103d_handle_rx_ba_event(struct mt76_dev *mdev, struct sk_buff *skb)
++{
++	struct mt7615_mcu_rxd *rxd = (struct mt7615_mcu_rxd *)skb->data;
++	struct mt76_wcid *wcid;
++	u8 wcid_idx, tid;
++	int ret = 0;
++
++	lockdep_assert_held(&mdev->mutex);
+ 
+ 	if (rxd->eid == W103D_MCU_EVENT_RX_ADDBA) {
+ 		struct mt7663s_w103d_rx_addba_event *event;
+@@ -2267,14 +2632,12 @@ mt7663s_w103d_handle_rx_ba_event(struct mt76_dev *mdev, struct sk_buff *skb)
+ 		ssn = IEEE80211_SEQ_TO_SN(le16_to_cpu(event->start_seq));
+ 		win_size = clamp_t(u16, win_size, 1, 64);
+ 
+-		mutex_lock(&mdev->mutex);
+ 		wcid = rcu_dereference_protected(mdev->wcid[wcid_idx],
+ 						 lockdep_is_held(&mdev->mutex));
+ 		if (!wcid || !wcid->sta)
+ 			ret = -ENOENT;
+ 		else
+ 			ret = mt76_rx_aggr_start(mdev, wcid, tid, ssn, win_size);
+-		mutex_unlock(&mdev->mutex);
+ 
+ 		dev_dbg_ratelimited(mdev->dev,
+ 			"W103D: firmware RX BA start wcid=%u tid=%u ssn=%u win=%u result=%d\n",
+@@ -2290,37 +2653,62 @@ mt7663s_w103d_handle_rx_ba_event(struct mt76_dev *mdev, struct sk_buff *skb)
+ 		if (tid >= IEEE80211_NUM_TIDS)
+ 			goto malformed;
+ 
+-		mutex_lock(&mdev->mutex);
+ 		wcid = rcu_dereference_protected(mdev->wcid[wcid_idx],
+ 						 lockdep_is_held(&mdev->mutex));
+ 		if (wcid && wcid->sta)
+ 			mt76_rx_aggr_stop(mdev, wcid, tid);
+ 		else
+ 			ret = -ENOENT;
+-		mutex_unlock(&mdev->mutex);
+ 
+ 		dev_dbg_ratelimited(mdev->dev,
+ 			"W103D: firmware RX BA stop wcid=%u tid=%u result=%d\n",
+ 			wcid_idx, tid, ret);
+ 	}
+ 
+-	dev_kfree_skb(skb);
+-	return true;
++	return;
+ 
+ malformed:
+ 	dev_dbg_ratelimited(mdev->dev,
+ 			     "W103D: malformed firmware RX BA event eid=%u len=%u\n",
+ 			     rxd->eid, skb->len);
+-	dev_kfree_skb(skb);
+-	return true;
++}
++
++static void mt7663s_w103d_ba_work(struct work_struct *work)
++{
++	struct mt7663s_w103d_intr_state *state =
++		container_of(work, struct mt7663s_w103d_intr_state, ba_work);
++	struct mt76_dev *mdev = state->mdev;
++	struct sk_buff *skb;
++
++	while ((skb = skb_dequeue(&state->ba_events))) {
++		mutex_lock(&mdev->mutex);
++		mt7663s_w103d_handle_rx_ba_event(mdev, skb);
++		mutex_unlock(&mdev->mutex);
++		dev_kfree_skb(skb);
++	}
+ }
+ 
+ void mt7663s_w103d_queue_rx_skb(struct mt76_dev *mdev, enum mt76_rxq_id qid,
+ 				 struct sk_buff *skb, u32 *info)
+ {
+-	if (mt7663s_w103d_active() &&
+-	    mt7663s_w103d_handle_rx_ba_event(mdev, skb))
++	struct mt7663s_w103d_intr_state *state;
++
++	/* The 2021 N9 firmware (7663mp1827) reports RX BA sessions with these
++	 * events; the 2020 one does not.  This runs from mt76s_net_worker with
++	 * BH disabled under rcu_read_lock(), where taking mdev->mutex or a
++	 * GFP_KERNEL allocation is invalid ("scheduling while atomic"), so defer
++	 * them to process context like other mutex-held mt76 work.
++	 */
++	if (mt7663s_w103d_active() && mt7663s_w103d_is_rx_ba_event(skb)) {
++		state = mt7663s_w103d_intr_state(mdev);
++		if (!state || READ_ONCE(state->quota_stopping)) {
++			dev_kfree_skb(skb);
++			return;
++		}
++		skb_queue_tail(&state->ba_events, skb);
++		queue_work(mdev->wq, &state->ba_work);
+ 		return;
++	}
+ 
+ 	mt7615_queue_rx_skb(mdev, qid, skb, info);
+ }
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.h b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.h
+index 18597af6d..a271001ed 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.h
+@@ -53,6 +53,12 @@ void mt7663s_w103d_note_assoc(struct ieee80211_hw *hw,
+ int mt7663s_w103d_hw_scan(struct ieee80211_hw *hw,
+ 			  struct ieee80211_vif *vif,
+ 			  struct ieee80211_scan_request *req);
++void mt7663s_w103d_mgd_prepare_tx(struct ieee80211_hw *hw,
++				  struct ieee80211_vif *vif,
++				  struct ieee80211_prep_tx_info *info);
++void mt7663s_w103d_mgd_complete_tx(struct ieee80211_hw *hw,
++				   struct ieee80211_vif *vif,
++				   struct ieee80211_prep_tx_info *info);
+ void mt7663s_w103d_cancel_hw_scan(struct ieee80211_hw *hw,
+ 				 struct ieee80211_vif *vif);
+ int mt7663s_w103d_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7663s/sdio.c b/drivers/net/wireless/mediatek/mt76/mt7663s/sdio.c
+index fec3d4f91..8116a00f7 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7663s/sdio.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7663s/sdio.c
+@@ -278,6 +278,8 @@ static int mt7663s_probe(struct sdio_func *func,
+ 		ops->bss_info_changed = mt7663s_bss_info_changed;
+ 		ops->hw_scan = mt7663s_w103d_hw_scan;
+ 		ops->cancel_hw_scan = mt7663s_w103d_cancel_hw_scan;
++		ops->mgd_prepare_tx = mt7663s_w103d_mgd_prepare_tx;
++		ops->mgd_complete_tx = mt7663s_w103d_mgd_complete_tx;
+ 		ops->set_key = mt7663s_w103d_set_key;
+ 		ops->ampdu_action = mt7663s_w103d_ampdu_action;
+ 	}

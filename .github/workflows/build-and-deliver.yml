@@ -38,6 +38,10 @@ jobs:
           REUSE_SYSTEM_RUN_ID: ${{ inputs.reuse_system_run_id }}
           REUSE_USB_RUN_ID: ${{ inputs.reuse_usb_run_id }}
         run: python3 scripts/orchestrate_build.py
+      - name: Publish the verified ZIP as the only (latest) W103D release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/publish_release.py
       - name: Cancel only this pipeline's unfinished child runs on failure or cancellation
         if: ${{ always() }}
         env:

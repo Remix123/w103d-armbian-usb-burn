@@ -253,6 +253,21 @@ def main() -> int:
             resize = mountpoint / "usr/local/sbin/w103d-resize-rootfs"
             if not resize.is_file() or stat.S_IMODE(resize.stat().st_mode) != 0o755 or "W103D_ROOT" not in resize.read_text():
                 raise SystemExit("W103D resize script is missing its executable mode or label guard")
+            wifi_lock = json.loads((Path(__file__).resolve().parent.parent / "config/wifi-firmware.lock.json").read_text())
+            wifi_checked = []
+            for entry in wifi_lock["files"]:
+                firmware = mountpoint / wifi_lock["install_dir"] / entry["name"]
+                if firmware.is_symlink() or not firmware.is_file() or sha256(firmware) != entry["sha256"]:
+                    raise SystemExit(f"rootfs Wi-Fi firmware is not the locked {entry['version']} file: {firmware.name}")
+                for compressed in (".zst", ".xz", ".gz"):
+                    if firmware.with_name(firmware.name + compressed).exists():
+                        raise SystemExit(f"rootfs has a compressed {firmware.name}{compressed} that would shadow the locked firmware")
+                wifi_checked.append({"name": entry["name"], "sha256": entry["sha256"], "version": entry["version"]})
+            if [{k: r[k] for k in ("sha256", "version")} for r in assembly.get("wifi_firmware", [])] != \
+                    [{k: r[k] for k in ("sha256", "version")} for r in wifi_checked]:
+                raise SystemExit("assembly report Wi-Fi firmware record differs from the packed rootfs")
+            if not sources_lock.get("kernel_patches") or assembly.get("kernel_patches") != sources_lock["kernel_patches"]:
+                raise SystemExit("kernel patch provenance is missing or differs between source lock and assembly")
             module_root = mountpoint / "lib/modules" / release
             if not module_root.is_dir():
                 module_root = mountpoint / "usr/lib/modules" / release
@@ -332,6 +347,8 @@ def main() -> int:
             "sparse_roundtrip": {"system": boot_info, "data": root_info},
             "fat_regular_files_checked": len(boot_file_checks), "kernel_release": release,
             "kernel_modules_byte_identical": len(module_records), "initramfs_modules_byte_identical": initrd_modules,
+            "wifi_firmware": wifi_checked,
+            "kernel_patches": [{"path": p["path"], "sha256": p["sha256"]} for p in sources_lock["kernel_patches"]],
             "root_filesystem": {"label": "W103D_ROOT", "read_only_mount": True, "e2fsck": "passed"},
             "u_boot_scripts": "mkimage legacy header and path configuration checked",
             "hardware_flashed": False, "hardware_boot_tested": False,

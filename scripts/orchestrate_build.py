@@ -31,10 +31,10 @@ def numeric_run_id(value: str | None, label: str) -> str | None:
     return value
 
 
-def select_correlated_run(runs: list[dict], *, pipeline_id: str, tag: str, head_sha: str, workflow_path: str) -> dict:
+def select_correlated_run(runs: list[dict], *, pipeline_id: str, ref: str, head_sha: str, workflow_path: str) -> dict:
     matches = [run for run in runs if
         run.get("event") == "workflow_dispatch" and
-        run.get("head_branch") == tag and
+        run.get("head_branch") == ref and
         run.get("head_sha") == head_sha and
         run.get("path") == workflow_path and
         pipeline_id in run.get("display_title", "")]
@@ -69,19 +69,28 @@ def summary(text: str) -> None:
             output.write(text + "\n")
 
 
-def api_runs(workflow: str, tag: str) -> list[dict]:
+def api_runs(workflow: str, ref: str) -> list[dict]:
     repo = os.environ["GITHUB_REPOSITORY"]
-    endpoint = f"repos/{repo}/actions/workflows/{workflow}/runs?event=workflow_dispatch&branch={quote(tag, safe='')}&per_page=100"
+    endpoint = f"repos/{repo}/actions/workflows/{workflow}/runs?event=workflow_dispatch&branch={quote(ref, safe='')}&per_page=100"
     return json.loads(gh("api", endpoint)).get("workflow_runs", [])
+
+
+def ensure_ref_unchanged(ref: str, head_sha: str) -> None:
+    """Children run on the dispatch branch, so the branch must not move mid-pipeline."""
+    current = json.loads(gh("api", f"repos/{os.environ['GITHUB_REPOSITORY']}/commits/{quote(ref, safe='')}"))["sha"]
+    if current != head_sha:
+        raise RuntimeError(f"{ref} moved from {head_sha} to {current} during the pipeline; "
+                           "re-run the pipeline so every stage uses one commit")
 
 
 def wait_for_child(stage: str, input_args: list[str], state: dict, stage_timeout: int) -> str:
     workflow, path, title = WORKFLOWS[stage]
-    pipeline_id, tag, head_sha = state["pipeline_id"], state["tag"], state["head_sha"]
-    command = ["workflow", "run", workflow, "--repo", os.environ["GITHUB_REPOSITORY"], "--ref", tag]
+    pipeline_id, ref, head_sha = state["pipeline_id"], state["ref"], state["head_sha"]
+    ensure_ref_unchanged(ref, head_sha)
+    command = ["workflow", "run", workflow, "--repo", os.environ["GITHUB_REPOSITORY"], "--ref", ref]
     for pair in [*input_args, ["pipeline_id", pipeline_id]]:
         command.extend(["--field", f"{pair[0]}={pair[1]}"])
-    state["pending_child"] = {"stage": stage, "workflow": workflow, "path": path, "tag": tag,
+    state["pending_child"] = {"stage": stage, "workflow": workflow, "path": path, "ref": ref,
                               "head_sha": head_sha, "pipeline_id": pipeline_id, "inputs": input_args}
     save_state(state)
     gh(*command)
@@ -89,27 +98,28 @@ def wait_for_child(stage: str, input_args: list[str], state: dict, stage_timeout
     run = None
     while time.monotonic() < deadline:
         try:
-            run = select_correlated_run(api_runs(workflow, tag), pipeline_id=pipeline_id, tag=tag, head_sha=head_sha, workflow_path=path)
+            run = select_correlated_run(api_runs(workflow, ref), pipeline_id=pipeline_id, ref=ref, head_sha=head_sha, workflow_path=path)
             validate_run_workflow(run, os.environ["GITHUB_REPOSITORY"], gh_workflow_lookup(os.environ["GITHUB_REPOSITORY"]), require_success=False)
             break
         except ValueError as error:
             if "found []" not in str(error):
                 raise
+            ensure_ref_unchanged(ref, head_sha)
             time.sleep(10)
     if run is None:
         raise TimeoutError(f"timed out waiting for uniquely correlated child run: {stage}")
-    child = {"stage": stage, "run_id": str(run["id"]), "path": path, "title": title, "url": run.get("html_url"), "head_sha": head_sha, "tag": tag}
+    child = {"stage": stage, "run_id": str(run["id"]), "path": path, "title": title, "url": run.get("html_url"), "head_sha": head_sha, "ref": ref}
     state["children"].append(child)
     state["active_child_run_id"] = child["run_id"]
     state["pending_child"] = None
     save_state(state)
-    summary(f"- {stage}: dispatched run [{child['run_id']}]({child['url']}) on `{tag}` at `{head_sha}`")
+    summary(f"- {stage}: dispatched run [{child['run_id']}]({child['url']}) on `{ref}` at `{head_sha}`")
     deadline = min(time.monotonic() + stage_timeout, GLOBAL_DEADLINE)
     last_status = None
     while time.monotonic() < deadline:
         fresh = json.loads(gh("api", f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{child['run_id']}"))
         validate_run_workflow(fresh, os.environ["GITHUB_REPOSITORY"], gh_workflow_lookup(os.environ["GITHUB_REPOSITORY"]), require_success=False)
-        if fresh.get("path") != path or fresh.get("head_branch") != tag or fresh.get("head_sha") != head_sha or pipeline_id not in fresh.get("display_title", ""):
+        if fresh.get("path") != path or fresh.get("head_branch") != ref or fresh.get("head_sha") != head_sha or pipeline_id not in fresh.get("display_title", ""):
             raise ValueError(f"child run provenance changed after dispatch: {fresh}")
         status = fresh.get("status")
         if status != last_status:
@@ -131,18 +141,16 @@ def main() -> None:
     repo = os.environ["GITHUB_REPOSITORY"]
     head_sha = os.environ["GITHUB_SHA"]
     pipeline_id = f"pipeline-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
-    tag = f"w103d-{pipeline_id}"
+    # Child workflows are dispatched on the same branch/tag that started this run and are
+    # correlated by head SHA + pipeline token; no per-run tag is pushed.
+    ref = os.environ["GITHUB_REF_NAME"]
     reuse_system = numeric_run_id(os.environ.get("REUSE_SYSTEM_RUN_ID"), "reuse_system_run_id")
     reuse_usb = numeric_run_id(os.environ.get("REUSE_USB_RUN_ID"), "reuse_usb_run_id")
     if reuse_system and reuse_usb:
         raise ValueError("provide at most one reuse run ID")
-    state = {"pipeline_id": pipeline_id, "tag": tag, "head_sha": head_sha, "children": [], "active_child_run_id": None}
+    state = {"pipeline_id": pipeline_id, "ref": ref, "head_sha": head_sha, "children": [], "active_child_run_id": None}
     save_state(state)
-    subprocess.run(["git", "tag", tag, head_sha], check=True)
-    subprocess.run(["git", "push", "origin", f"refs/tags/{tag}"], check=True)
-    state["tag_created"] = True
-    save_state(state)
-    summary(f"## W103D source build pipeline `{pipeline_id}`\n\nFixed source ref: `{tag}` -> `{head_sha}`. Each stage is a separate workflow run and is correlated by this tag, SHA, workflow path, and token. Any failed stage stops delivery.")
+    summary(f"## W103D source build pipeline `{pipeline_id}`\n\nSource: `{ref}` at `{head_sha}`. Each stage is a separate workflow run on this ref, correlated by head SHA, workflow path and pipeline token; the pipeline stops if `{ref}` moves. Any failed stage stops delivery.")
 
     if reuse_usb:
         run = checked_run(reuse_usb, WORKFLOWS["usb"][1])

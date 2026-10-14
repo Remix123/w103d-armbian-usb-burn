@@ -96,13 +96,12 @@ jobs:
           validate_run_workflow(run, os.environ['GITHUB_REPOSITORY'], gh_workflow_lookup(os.environ['GITHUB_REPOSITORY']))
           expected={
               '.github/workflows/compile-kernel.yml':('Compile pinned Ophub W103D kernel',f"w103d-kernel-build-{run.get('id')}"),
-              '.github/workflows/recover-kernel-artifact.yml':('Recover and verify existing W103D kernel artifact',f"w103d-kernel-recovery-{run.get('id')}")
           }
           if run.get('path') not in expected:
               raise SystemExit(f"kernel source run is not an approved immutable artifact: {run}")
           with open(os.environ['GITHUB_OUTPUT'],'a') as output: output.write(f"artifact_name={expected[run['path']][1]}\n")
           PY
-            artifact_name=$(python3 -c 'import json,os; r=json.load(open(os.environ["RUNNER_TEMP"]+"/kernel-source-run.json")); print(("w103d-kernel-build-" if r["path"].endswith("compile-kernel.yml") else "w103d-kernel-recovery-")+str(r["id"]))')
+            artifact_name="w103d-kernel-build-$kernel_run"
             gh run download "$kernel_run" --repo "$GITHUB_REPOSITORY" --name "$artifact_name" --dir "$RUNNER_TEMP/kernel-source-artifact"
             python3 scripts/prepare_kernel_input.py --artifact-dir "$RUNNER_TEMP/kernel-source-artifact" --output-dir "$RUNNER_TEMP/kernel-exact" --run-id "$kernel_run"
             archive="$RUNNER_TEMP/kernel-exact/${version}.tar.gz"
@@ -143,7 +142,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes ca-certificates curl dosfstools e2fsprogs file gzip initramfs-tools-core mtools parted python3 rsync u-boot-tools util-linux zstd
+          sudo apt-get install --yes abootimg ca-certificates curl device-tree-compiler dosfstools e2fsprogs file gzip initramfs-tools-core kmod lz4 mtools parted python3 rsync u-boot-tools util-linux zstd
           git clone https://github.com/khadas/utils.git "$RUNNER_TEMP/khadas-utils"
           git -C "$RUNNER_TEMP/khadas-utils" checkout --detach a3604ed6d6863d1946d26d0ac8e765aef6f17430
           packer="$RUNNER_TEMP/khadas-utils/aml-flash-tool/tools/linux-x86/aml_image_v2_packer"
@@ -152,6 +151,33 @@ jobs:
           file "$packer"
           "$packer" -c "$RUNNER_TEMP/reference/W103D_Armbian_26.8.1_Server.img"
           echo "AMLPACKER=$packer" >> "$GITHUB_ENV"
+
+      - name: Extract the hash-locked 2021 MT7663 Wi-Fi firmware from the reference package
+        run: |
+          set -euo pipefail
+          components="$RUNNER_TEMP/reference-components"
+          mkdir -p "$components"
+          "$AMLPACKER" -d "$RUNNER_TEMP/reference/W103D_Armbian_26.8.1_Server.img" "$components" > "$RUNNER_TEMP/reference-unpack.log" 2>&1
+          python3 scripts/audit_reference_wifi.py \
+            --components "$components" \
+            --out "$RUNNER_TEMP/reference-wifi-audit.json" \
+            --export-firmware-dir "$RUNNER_TEMP/wifi-firmware" \
+            --reference-lock config/reference.lock.json \
+            --source-run "$GITHUB_RUN_ID" \
+            --source-run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          lock = json.loads(Path('config/wifi-firmware.lock.json').read_text())
+          fw = Path(os.environ['RUNNER_TEMP']) / 'wifi-firmware'
+          for entry in lock['files']:
+              digest = hashlib.sha256((fw / entry['name']).read_bytes()).hexdigest()
+              if digest != entry['sha256']:
+                  raise SystemExit(f"extracted {entry['name']} {digest} differs from config/wifi-firmware.lock.json")
+              print(f"{entry['name']}: {digest} ({entry['version']})")
+          PY
+          rm -rf "$components"
+          echo "WIFI_FIRMWARE_DIR=$RUNNER_TEMP/wifi-firmware" >> "$GITHUB_ENV"
 
       - name: Exercise U-Boot script parser against runner mkimage
         run: |
@@ -204,7 +230,7 @@ jobs:
             --kernel-archive "$KERNEL_ARCHIVE" --kernel-manifest "$manifest" \
             --sources-lock "$SOURCES_LOCK" --base-image-lock "$BASE_IMAGE_LOCK" \
             --ophub-boot-emmc "$OPHUB_BOOT_EMMC" \
-            --packer "$AMLPACKER" --work "$RUNNER_TEMP/assemble" \
+            --packer "$AMLPACKER" --wifi-firmware-dir "$WIFI_FIRMWARE_DIR" --work "$RUNNER_TEMP/assemble" \
             --output "outputs/W103D_Armbian_{armbian_version}_{kernel_version}_USB_Burning_Tool.img"
           cp "$RUNNER_TEMP/assemble/assembly-input-report.json" outputs/assembly-input-report.json
           cp config/reference.lock.json outputs/reference.lock.json
@@ -214,6 +240,8 @@ jobs:
           cp "$BASE_IMAGE_LOCK" outputs/provenance/base-image.lock.json
           cp "$report" outputs/provenance/system-image-verification.json
           cp "$RUNNER_TEMP/system-run.json" outputs/provenance/system-source-run.json
+          cp "$WIFI_FIRMWARE_DIR/manifest.json" outputs/provenance/wifi-firmware-manifest.json
+          cp "$RUNNER_TEMP/reference-wifi-audit.json" outputs/provenance/reference-wifi-audit.json
           echo "SOURCES_LOCK=$GITHUB_WORKSPACE/outputs/provenance/sources.lock.json" >> "$GITHUB_ENV"
           echo "KERNEL_MANIFEST=$GITHUB_WORKSPACE/outputs/provenance/kernel-input-manifest.json" >> "$GITHUB_ENV"
           echo "BASE_IMAGE_LOCK=$GITHUB_WORKSPACE/outputs/provenance/base-image.lock.json" >> "$GITHUB_ENV"
