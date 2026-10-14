@@ -89,11 +89,15 @@ def main() -> int:
 
     container_name = "ophub/armbian-resolute"
     container_digest = docker_manifest_digest(container_name, "arm64")
-    toolchain_release = get_json(f"{API}/repos/ophub/kernel/releases/tags/dev")
+    # Ophub publishes the GNU toolchains in the release tagged "toolchain"
+    # (previously "dev", which no longer exists and returned HTTP 404 here).
+    toolchain_tag = "toolchain"
+    toolchain_release = get_json(f"{API}/repos/ophub/kernel/releases/tags/{toolchain_tag}")
     toolchain_name = "arm-gnu-toolchain-15.3.rel1-aarch64-aarch64-none-linux-gnu.tar.xz"
     toolchain_matches = [a for a in toolchain_release.get("assets", []) if a["name"] == toolchain_name]
     if len(toolchain_matches) != 1:
-        raise SystemExit("Ophub kernel dev release does not contain exactly one pinned GNU toolchain asset")
+        raise SystemExit(f"Ophub kernel {toolchain_tag} release does not contain exactly one asset "
+                         f"named {toolchain_name}")
     toolchain = toolchain_matches[0]
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", toolchain.get("digest", "")):
         raise SystemExit("GitHub API did not provide an immutable SHA-256 for the GNU toolchain asset")
