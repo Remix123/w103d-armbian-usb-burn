@@ -86,10 +86,10 @@ jobs:
         uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:
           path: |
-            cache/kernel-debs/*.deb
-            cache/kernel-packages.json
-            cache/sources.lock.json
-            cache/toolchain-version.txt
+            outputs/kernel-debs
+            outputs/kernel-packages.json
+            outputs/sources.lock.json
+            outputs/toolchain-version.txt
           key: w103d-kernel-${{ needs.resolve.outputs.kernel_sha }}-${{ hashFiles('config/kernel.config', 'config/kernel-patches.json', 'patches/w103d/**') }}-${{ needs.resolve.outputs.toolchain_sha256 }}-${{ needs.resolve.outputs.container_digest }}
           restore-keys: |
             w103d-kernel-
@@ -99,12 +99,9 @@ jobs:
         run: |
           set -euo pipefail
           echo "✓ Kernel cache hit, skipping compilation"
-          mkdir -p outputs/kernel-debs
-          cp cache/kernel-debs/*.deb outputs/kernel-debs/
-          cp cache/kernel-packages.json outputs/kernel-packages.json
-          cp cache/sources.lock.json outputs/sources.lock.json
-          cp cache/toolchain-version.txt outputs/toolchain-version.txt
           ls -lh outputs/kernel-debs/
+          echo "Kernel packages:"
+          cat outputs/kernel-packages.json
 
       - name: Checkout the exact Ophub build scripts
         if: steps.kernel-cache.outputs.cache-hit != 'true'
@@ -255,14 +252,14 @@ jobs:
             --version "$KERNEL_VERSION" \
             --out outputs/kernel-packages.json
           cp "$RUNNER_TEMP/sources.lock.json" outputs/sources.lock.json
-          cp outputs-toolchain-version.txt outputs/toolchain-version.txt
+          cp outputs/toolchain-version.txt outputs/toolchain-version.txt
 
       - name: Save kernel compilation cache
         if: steps.kernel-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:
           path: |
-            outputs/kernel-debs/*.deb
+            outputs/kernel-debs
             outputs/kernel-packages.json
             outputs/sources.lock.json
             outputs/toolchain-version.txt
