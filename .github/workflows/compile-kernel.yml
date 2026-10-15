@@ -98,6 +98,7 @@ jobs:
             outputs/kernel-packages.json
             outputs/sources.lock.json
             outputs/toolchain-version.txt
+            outputs/kernel-tarball
           key: w103d-kernel-${{ needs.resolve.outputs.kernel_sha }}-${{ hashFiles('config/kernel.config', inputs.patch_config, 'patches/w103d/**') }}-${{ needs.resolve.outputs.toolchain_sha256 }}-${{ needs.resolve.outputs.container_digest }}
           restore-keys: |
             w103d-kernel-
@@ -110,6 +111,9 @@ jobs:
           ls -lh outputs/kernel-debs/
           echo "Kernel packages:"
           cat outputs/kernel-packages.json
+          # Restore tarball to expected location for artifact upload
+          mkdir -p upstream/ophub/compile-kernel/output
+          cp outputs/kernel-tarball/*.tar.gz upstream/ophub/compile-kernel/output/
 
       - name: Checkout the exact Ophub build scripts
         if: steps.kernel-cache.outputs.cache-hit != 'true'
@@ -263,6 +267,9 @@ jobs:
             --version "$KERNEL_VERSION" \
             --out outputs/kernel-packages.json
           cp "$RUNNER_TEMP/sources.lock.json" outputs/sources.lock.json
+          # Copy tarball to outputs for caching
+          mkdir -p outputs/kernel-tarball
+          cp "$runtime_archive" outputs/kernel-tarball/
 
       - name: Save kernel compilation cache
         if: steps.kernel-cache.outputs.cache-hit != 'true'
@@ -273,6 +280,7 @@ jobs:
             outputs/kernel-packages.json
             outputs/sources.lock.json
             outputs/toolchain-version.txt
+            outputs/kernel-tarball
           key: w103d-kernel-${{ needs.resolve.outputs.kernel_sha }}-${{ hashFiles('config/kernel.config', inputs.patch_config, 'patches/w103d/**') }}-${{ needs.resolve.outputs.toolchain_sha256 }}-${{ needs.resolve.outputs.container_digest }}
 
       - name: Upload kernel build results and diagnostics
