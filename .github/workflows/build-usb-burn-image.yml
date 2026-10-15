@@ -152,32 +152,22 @@ jobs:
           "$packer" -c "$RUNNER_TEMP/reference/W103D_Armbian_26.8.1_Server.img"
           echo "AMLPACKER=$packer" >> "$GITHUB_ENV"
 
-      - name: Extract the hash-locked 2021 MT7663 Wi-Fi firmware from the reference package
+      - name: Verify Wi-Fi firmware files in repository
         run: |
           set -euo pipefail
-          components="$RUNNER_TEMP/reference-components"
-          mkdir -p "$components"
-          "$AMLPACKER" -d "$RUNNER_TEMP/reference/W103D_Armbian_26.8.1_Server.img" "$components" > "$RUNNER_TEMP/reference-unpack.log" 2>&1
-          python3 scripts/audit_reference_wifi.py \
-            --components "$components" \
-            --out "$RUNNER_TEMP/reference-wifi-audit.json" \
-            --export-firmware-dir "$RUNNER_TEMP/wifi-firmware" \
-            --reference-lock config/reference.lock.json \
-            --source-run "$GITHUB_RUN_ID" \
-            --source-run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           python3 - <<'PY'
-          import hashlib, json, os
+          import hashlib, json
           from pathlib import Path
           lock = json.loads(Path('config/wifi-firmware.lock.json').read_text())
-          fw = Path(os.environ['RUNNER_TEMP']) / 'wifi-firmware'
           for entry in lock['files']:
-              digest = hashlib.sha256((fw / entry['name']).read_bytes()).hexdigest()
+              fw_path = Path(entry['repo_path'])
+              if not fw_path.is_file():
+                  raise SystemExit(f"firmware {entry['name']} not found at {entry['repo_path']}")
+              digest = hashlib.sha256(fw_path.read_bytes()).hexdigest()
               if digest != entry['sha256']:
-                  raise SystemExit(f"extracted {entry['name']} {digest} differs from config/wifi-firmware.lock.json")
-              print(f"{entry['name']}: {digest} ({entry['version']})")
+                  raise SystemExit(f"{entry['name']} at {entry['repo_path']} has {digest}, expected {entry['sha256']}")
+              print(f"✓ {entry['name']}: {digest} ({entry['version']})")
           PY
-          rm -rf "$components"
-          echo "WIFI_FIRMWARE_DIR=$RUNNER_TEMP/wifi-firmware" >> "$GITHUB_ENV"
 
       - name: Exercise U-Boot script parser against runner mkimage
         run: |
@@ -230,7 +220,7 @@ jobs:
             --kernel-archive "$KERNEL_ARCHIVE" --kernel-manifest "$manifest" \
             --sources-lock "$SOURCES_LOCK" --base-image-lock "$BASE_IMAGE_LOCK" \
             --ophub-boot-emmc "$OPHUB_BOOT_EMMC" \
-            --packer "$AMLPACKER" --wifi-firmware-dir "$WIFI_FIRMWARE_DIR" --work "$RUNNER_TEMP/assemble" \
+            --packer "$AMLPACKER" --work "$RUNNER_TEMP/assemble" \
             --output "outputs/W103D_Armbian_{armbian_version}_{kernel_version}_USB_Burning_Tool.img"
           cp "$RUNNER_TEMP/assemble/assembly-input-report.json" outputs/assembly-input-report.json
           cp config/reference.lock.json outputs/reference.lock.json

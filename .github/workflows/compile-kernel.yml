@@ -81,25 +81,54 @@ jobs:
         with:
           name: sources-lock-${{ github.run_id }}
           path: ${{ runner.temp }}
+      - name: Restore kernel compilation cache
+        id: kernel-cache
+        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: |
+            cache/kernel-debs/*.deb
+            cache/kernel-packages.json
+            cache/sources.lock.json
+            cache/toolchain-version.txt
+          key: w103d-kernel-${{ needs.resolve.outputs.kernel_sha }}-${{ hashFiles('config/kernel.config', 'config/kernel-patches.json', 'patches/w103d/**') }}-${{ needs.resolve.outputs.toolchain_sha256 }}-${{ needs.resolve.outputs.container_digest }}
+          restore-keys: |
+            w103d-kernel-
+
+      - name: Use cached kernel if available
+        if: steps.kernel-cache.outputs.cache-hit == 'true'
+        run: |
+          set -euo pipefail
+          echo "✓ Kernel cache hit, skipping compilation"
+          mkdir -p outputs/kernel-debs
+          cp cache/kernel-debs/*.deb outputs/kernel-debs/
+          cp cache/kernel-packages.json outputs/kernel-packages.json
+          cp cache/sources.lock.json outputs/sources.lock.json
+          cp cache/toolchain-version.txt outputs/toolchain-version.txt
+          ls -lh outputs/kernel-debs/
+
       - name: Checkout the exact Ophub build scripts
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: ophub/amlogic-s9xxx-armbian
           ref: ${{ needs.resolve.outputs.ophub_sha }}
           path: upstream/ophub
       - name: Checkout the exact Ophub Linux kernel source
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: ophub/linux-${{ needs.resolve.outputs.kernel_series }}
           ref: ${{ needs.resolve.outputs.kernel_sha }}
           path: upstream/ophub/compile-kernel/kernel/linux-${{ needs.resolve.outputs.kernel_series }}-main
       - name: Checkout the exact Ophub kernel config repository
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: ophub/kernel
           ref: ${{ needs.resolve.outputs.kernel_meta_sha }}
           path: upstream/kernel-meta
       - name: Validate pinned checkouts and install the pinned kernel config
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
         env:
           OPHUB_SHA: ${{ needs.resolve.outputs.ophub_sha }}
           KERNEL_SHA: ${{ needs.resolve.outputs.kernel_sha }}
@@ -124,6 +153,7 @@ jobs:
           git -C upstream/ophub log -1 --format='%H %s'
           git -C "$src" log -1 --format='%H %s'
       - name: Apply the W103D kernel patches recorded in the source lock
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
         env:
           KERNEL_SERIES: ${{ needs.resolve.outputs.kernel_series }}
         run: |
@@ -132,8 +162,10 @@ jobs:
             --src "upstream/ophub/compile-kernel/kernel/linux-${KERNEL_SERIES}-main" \
             --lock "$RUNNER_TEMP/sources.lock.json"
       - name: Pin recompile to the checked-out Ophub helper
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
         run: python3 scripts/prepare_locked_recompile.py --ophub upstream/ophub
       - name: Install the hash-verified Ophub ARM GNU toolchain
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
         env:
           TOOLCHAIN_URL: ${{ needs.resolve.outputs.toolchain_url }}
           TOOLCHAIN_ASSET: ${{ needs.resolve.outputs.toolchain_asset }}
@@ -148,6 +180,7 @@ jobs:
           test -x "$toolchain_root/${TOOLCHAIN_ASSET%.tar.xz}/bin/aarch64-none-linux-gnu-gcc"
           "$toolchain_root/${TOOLCHAIN_ASSET%.tar.xz}/bin/aarch64-none-linux-gnu-gcc" --version | head -n1 | tee outputs-toolchain-version.txt
       - name: Compile kernel packages from the locked source
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
         env:
           KERNEL_VERSION: ${{ needs.resolve.outputs.kernel_version }}
           CONTAINER_DIGEST: ${{ needs.resolve.outputs.container_digest }}
@@ -192,6 +225,7 @@ jobs:
           docker ps -a > diagnostics/docker-ps.txt 2>&1 || true
           docker logs armbian-ophub > diagnostics/container.log 2>&1 || true
       - name: Verify exact kernel packages and preserve build provenance
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
         env:
           KERNEL_VERSION: ${{ needs.resolve.outputs.kernel_version }}
         run: |
@@ -222,6 +256,18 @@ jobs:
             --out outputs/kernel-packages.json
           cp "$RUNNER_TEMP/sources.lock.json" outputs/sources.lock.json
           cp outputs-toolchain-version.txt outputs/toolchain-version.txt
+
+      - name: Save kernel compilation cache
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: |
+            outputs/kernel-debs/*.deb
+            outputs/kernel-packages.json
+            outputs/sources.lock.json
+            outputs/toolchain-version.txt
+          key: w103d-kernel-${{ needs.resolve.outputs.kernel_sha }}-${{ hashFiles('config/kernel.config', 'config/kernel-patches.json', 'patches/w103d/**') }}-${{ needs.resolve.outputs.toolchain_sha256 }}-${{ needs.resolve.outputs.container_digest }}
+
       - name: Upload kernel build results and diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

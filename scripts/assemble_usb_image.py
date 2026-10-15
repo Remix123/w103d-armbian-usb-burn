@@ -154,16 +154,16 @@ def ensure_uinitrd(source_boot: Path, source_initrd: Path, output: Path) -> byte
     return payload
 
 
-def install_wifi_firmware(root: Path, firmware_dir: Path, lock: dict) -> list[dict]:
-    """Install the hash-locked MT7663 firmware over the base image copies."""
+def install_wifi_firmware(root: Path, lock: dict) -> list[dict]:
+    """Install the hash-locked MT7663 firmware from repository over the base image copies."""
     target_dir = root / lock["install_dir"]
     if not target_dir.is_dir():
         raise SystemExit(f"rebuilt rootfs has no firmware directory /{lock['install_dir']}")
     records = []
     for entry in lock["files"]:
-        source = firmware_dir / entry["name"]
-        if not source.is_file() or hash_file(source) != entry["sha256"]:
-            raise SystemExit(f"Wi-Fi firmware input {entry['name']} is missing or differs from config/wifi-firmware.lock.json")
+        repo_path = Path(entry["repo_path"])
+        if not repo_path.is_file() or hash_file(repo_path) != entry["sha256"]:
+            raise SystemExit(f"Wi-Fi firmware {entry['name']} is missing or differs from config/wifi-firmware.lock.json at {repo_path}")
         target = target_dir / entry["name"]
         previous = None
         if target.is_symlink() or target.exists():
@@ -172,7 +172,7 @@ def install_wifi_firmware(root: Path, firmware_dir: Path, lock: dict) -> list[di
         for compressed in (".zst", ".xz", ".gz"):
             # A compressed copy would be loaded instead of the plain file; there must not be one.
             target.with_name(target.name + compressed).unlink(missing_ok=True)
-        shutil.copyfile(source, target)
+        shutil.copyfile(repo_path, target)
         target.chmod(0o644)
         if hash_file(target) != entry["sha256"]:
             raise SystemExit(f"installed Wi-Fi firmware readback mismatch: {entry['name']}")
@@ -180,7 +180,6 @@ def install_wifi_firmware(root: Path, firmware_dir: Path, lock: dict) -> list[di
                         "sha256": entry["sha256"], "version": entry["version"],
                         "replaced_sha256": previous})
     return records
-
 
 def gunzip_sparse(source: Path, target: Path) -> int:
     logical = 0
@@ -205,13 +204,11 @@ def main() -> int:
     ap.add_argument("--base-image-lock", type=Path, required=True)
     ap.add_argument("--ophub-boot-emmc", type=Path, required=True)
     ap.add_argument("--packer", type=Path, required=True)
-    ap.add_argument("--wifi-firmware-dir", type=Path, required=True,
-                    help="directory with the firmware files listed in config/wifi-firmware.lock.json")
     ap.add_argument("--work", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
     a = ap.parse_args()
     for p in (a.reference_dir, a.system_image, a.system_report, a.kernel_archive, a.kernel_manifest,
-              a.sources_lock, a.base_image_lock, a.ophub_boot_emmc, a.packer, a.wifi_firmware_dir):
+              a.sources_lock, a.base_image_lock, a.ophub_boot_emmc, a.packer):
         if not p.exists():
             raise SystemExit(f"required input does not exist: {p}")
     output_template = a.output.as_posix()
@@ -303,7 +300,7 @@ def main() -> int:
         if shutil.disk_usage(root_mount).used > (4 << 30) * 0.92:
             raise SystemExit("rebuilt root filesystem payload leaves insufficient ext4 reserve")
         wifi_lock = json.loads(Path("config/wifi-firmware.lock.json").read_text())
-        wifi_firmware = install_wifi_firmware(root_mount, a.wifi_firmware_dir, wifi_lock)
+        wifi_firmware = install_wifi_firmware(root_mount, wifi_lock)
         fstab = root_mount / "etc/fstab"
         fstab.write_text("LABEL=W103D_ROOT / ext4 defaults,noatime,nodiratime,errors=remount-ro 0 1\nLABEL=W103D_BOOT /boot vfat defaults 0 2\ntmpfs /tmp tmpfs defaults,nosuid 0 0\n")
         (root_mount / "root/.no_rootfs_resize").write_text("no\n")
