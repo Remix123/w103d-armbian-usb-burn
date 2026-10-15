@@ -175,7 +175,8 @@ jobs:
           echo "$TOOLCHAIN_SHA256  $RUNNER_TEMP/$TOOLCHAIN_ASSET" | sha256sum --check
           tar -xJf "$RUNNER_TEMP/$TOOLCHAIN_ASSET" -C "$toolchain_root"
           test -x "$toolchain_root/${TOOLCHAIN_ASSET%.tar.xz}/bin/aarch64-none-linux-gnu-gcc"
-          "$toolchain_root/${TOOLCHAIN_ASSET%.tar.xz}/bin/aarch64-none-linux-gnu-gcc" --version | head -n1 | tee outputs-toolchain-version.txt
+          mkdir -p outputs
+          "$toolchain_root/${TOOLCHAIN_ASSET%.tar.xz}/bin/aarch64-none-linux-gnu-gcc" --version | head -n1 | tee outputs/toolchain-version.txt
       - name: Compile kernel packages from the locked source
         if: steps.kernel-cache.outputs.cache-hit != 'true'
         env:
@@ -252,7 +253,6 @@ jobs:
             --version "$KERNEL_VERSION" \
             --out outputs/kernel-packages.json
           cp "$RUNNER_TEMP/sources.lock.json" outputs/sources.lock.json
-          cp outputs-toolchain-version.txt outputs/toolchain-version.txt
 
       - name: Save kernel compilation cache
         if: steps.kernel-cache.outputs.cache-hit != 'true'

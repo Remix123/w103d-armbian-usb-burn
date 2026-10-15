@@ -176,7 +176,7 @@ jobs:
           import struct, subprocess, tempfile, sys
           from pathlib import Path
           sys.path.insert(0, 'scripts')
-          from scripts.verify_usb_image import verify_legacy_image, verify_script_image
+          from verify_usb_image import verify_legacy_image, verify_script_image
           with tempfile.TemporaryDirectory(prefix='w103d-mkimage-script-test-') as td:
               root=Path(td)
               for size in (1, 2, 3, 4):
