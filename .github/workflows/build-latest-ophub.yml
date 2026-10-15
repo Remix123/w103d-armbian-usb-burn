@@ -1,0 +1,368 @@
+name: Build W103D with latest Ophub (rolling)
+run-name: W103D latest Ophub build (${{ github.run_id }})
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run weekly on Monday at 02:00 UTC to pick up latest Ophub updates
+    - cron: '0 2 * * 1'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: w103d-latest-ophub-pipeline
+  cancel-in-progress: false
+
+jobs:
+  resolve-latest:
+    runs-on: ubuntu-24.04
+    outputs:
+      ophub_sha: ${{ steps.latest.outputs.ophub_sha }}
+      kernel_sha: ${{ steps.latest.outputs.kernel_sha }}
+      kernel_meta_sha: ${{ steps.latest.outputs.kernel_meta_sha }}
+      kernel_series: ${{ steps.latest.outputs.kernel_series }}
+      kernel_version: ${{ steps.latest.outputs.kernel_version }}
+      kernel_config: ${{ steps.latest.outputs.kernel_config }}
+      kernel_config_sha256: ${{ steps.latest.outputs.kernel_config_sha256 }}
+      container_digest: ${{ steps.latest.outputs.container_digest }}
+      toolchain_asset: ${{ steps.latest.outputs.toolchain_asset }}
+      toolchain_url: ${{ steps.latest.outputs.toolchain_url }}
+      toolchain_sha256: ${{ steps.latest.outputs.toolchain_sha256 }}
+      base_image_url: ${{ steps.latest.outputs.base_image_url }}
+      base_image_sha256: ${{ steps.latest.outputs.base_image_sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Resolve LATEST ophub/amlogic-s9xxx-armbian and kernel sources
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "Fetching latest ophub/amlogic-s9xxx-armbian..."
+          ophub_sha=$(gh api repos/ophub/amlogic-s9xxx-armbian/commits/main --jq .sha)
+          echo "ophub_sha=$ophub_sha" >> $GITHUB_OUTPUT
+
+          # Determine kernel series from Ophub's make.env
+          temp_ophub=$(mktemp -d)
+          git clone --depth=1 --single-branch --branch=main https://github.com/ophub/amlogic-s9xxx-armbian.git "$temp_ophub"
+
+          # Extract kernel version from make.env (e.g., KERNEL_VERSION_NAME="6.6.y")
+          kernel_series=$(grep -oP 'KERNEL_VERSION_NAME="\K[^"]+' "$temp_ophub/make.env" | head -n1)
+          echo "kernel_series=$kernel_series" >> $GITHUB_OUTPUT
+
+          # Get latest kernel commit
+          kernel_sha=$(gh api "repos/ophub/linux-${kernel_series}/commits/main" --jq .sha)
+          echo "kernel_sha=$kernel_sha" >> $GITHUB_OUTPUT
+
+          # Get latest kernel meta (config) commit
+          kernel_meta_sha=$(gh api repos/ophub/kernel/commits/main --jq .sha)
+          echo "kernel_meta_sha=$kernel_meta_sha" >> $GITHUB_OUTPUT
+
+          # Extract kernel version from Makefile
+          temp_kernel=$(mktemp -d)
+          git clone --depth=1 --single-branch --branch=main "https://github.com/ophub/linux-${kernel_series}.git" "$temp_kernel"
+          version=$(sed -nE 's/^VERSION = ([0-9]+)$/\1/p' "$temp_kernel/Makefile" | head -n1)
+          patchlevel=$(sed -nE 's/^PATCHLEVEL = ([0-9]+)$/\1/p' "$temp_kernel/Makefile" | head -n1)
+          sublevel=$(sed -nE 's/^SUBLEVEL = ([0-9]+)$/\1/p' "$temp_kernel/Makefile" | head -n1)
+          kernel_version="$version.$patchlevel.$sublevel"
+          echo "kernel_version=$kernel_version" >> $GITHUB_OUTPUT
+
+          # Determine kernel config path
+          series_short="${kernel_series%.y}"
+          kernel_config="config-${series_short}"
+          echo "kernel_config=$kernel_config" >> $GITHUB_OUTPUT
+
+          # Get kernel config SHA256
+          temp_meta=$(mktemp -d)
+          git clone --depth=1 --single-branch --branch=main https://github.com/ophub/kernel.git "$temp_meta"
+          config_sha256=$(sha256sum "$temp_meta/$kernel_config" | cut -d' ' -f1)
+          echo "kernel_config_sha256=$config_sha256" >> $GITHUB_OUTPUT
+
+          # Get container digest
+          container_digest=$(gh api repos/ophub/amlogic-s9xxx-armbian/commits/main --jq '.sha' | xargs -I {} gh api "repos/ophub/amlogic-s9xxx-armbian/git/commits/{}" --jq '.tree.sha')
+          echo "container_digest=$container_digest" >> $GITHUB_OUTPUT
+
+          # Get toolchain info from Ophub's script
+          toolchain_asset="arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-linux-gnu.tar.xz"
+          toolchain_url="https://github.com/ophub/kernel/releases/download/tools/${toolchain_asset}"
+          echo "toolchain_asset=$toolchain_asset" >> $GITHUB_OUTPUT
+          echo "toolchain_url=$toolchain_url" >> $GITHUB_OUTPUT
+
+          # Get toolchain SHA256 from Ophub's releases
+          toolchain_sha256=$(curl -sL "https://github.com/ophub/kernel/releases/download/tools/${toolchain_asset}.sha" | cut -d' ' -f1 || echo "")
+          if [ -z "$toolchain_sha256" ]; then
+            # Fallback: download and calculate ourselves
+            curl -sL "$toolchain_url" -o /tmp/toolchain.tar.xz
+            toolchain_sha256=$(sha256sum /tmp/toolchain.tar.xz | cut -d' ' -f1)
+          fi
+          echo "toolchain_sha256=$toolchain_sha256" >> $GITHUB_OUTPUT
+
+          # Get latest Armbian base image
+          base_url=$(gh api repos/ophub/amlogic-s9xxx-armbian/releases/latest --jq '.assets[] | select(.name | test("Armbian.*generic.*arm64.*\\.img\\.gz$")) | .browser_download_url' | head -n1)
+          echo "base_image_url=$base_url" >> $GITHUB_OUTPUT
+
+          # Calculate base image SHA256
+          curl -sL "$base_url" -o /tmp/base.img.gz
+          base_sha256=$(sha256sum /tmp/base.img.gz | cut -d' ' -f1)
+          echo "base_image_sha256=$base_sha256" >> $GITHUB_OUTPUT
+
+          # Cleanup
+          rm -rf "$temp_ophub" "$temp_kernel" "$temp_meta"
+
+          echo "=== Latest Ophub versions resolved ==="
+          echo "Ophub: $ophub_sha"
+          echo "Kernel: linux-${kernel_series} @ $kernel_sha (v${kernel_version})"
+          echo "Kernel meta: $kernel_meta_sha"
+          echo "Container: $container_digest"
+
+  compile-latest-kernel:
+    needs: resolve-latest
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Checkout latest Ophub build scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ophub/amlogic-s9xxx-armbian
+          ref: ${{ needs.resolve-latest.outputs.ophub_sha }}
+          path: upstream/ophub
+
+      - name: Checkout latest Ophub Linux kernel source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ophub/linux-${{ needs.resolve-latest.outputs.kernel_series }}
+          ref: ${{ needs.resolve-latest.outputs.kernel_sha }}
+          path: upstream/ophub/compile-kernel/kernel/linux-${{ needs.resolve-latest.outputs.kernel_series }}-main
+
+      - name: Checkout latest Ophub kernel config repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ophub/kernel
+          ref: ${{ needs.resolve-latest.outputs.kernel_meta_sha }}
+          path: upstream/kernel-meta
+
+      - name: Validate checkouts and install kernel config
+        env:
+          KERNEL_SERIES: ${{ needs.resolve-latest.outputs.kernel_series }}
+          KERNEL_VERSION: ${{ needs.resolve-latest.outputs.kernel_version }}
+          KERNEL_CONFIG: ${{ needs.resolve-latest.outputs.kernel_config }}
+          KERNEL_CONFIG_SHA256: ${{ needs.resolve-latest.outputs.kernel_config_sha256 }}
+        run: |
+          set -euo pipefail
+          src="upstream/ophub/compile-kernel/kernel/linux-${KERNEL_SERIES}-main"
+          version=$(sed -nE 's/^VERSION = ([0-9]+)$/\1/p' "$src/Makefile" | head -n1)
+          patchlevel=$(sed -nE 's/^PATCHLEVEL = ([0-9]+)$/\1/p' "$src/Makefile" | head -n1)
+          sublevel=$(sed -nE 's/^SUBLEVEL = ([0-9]+)$/\1/p' "$src/Makefile" | head -n1)
+          test "$version.$patchlevel.$sublevel" = "$KERNEL_VERSION"
+          config="upstream/kernel-meta/$KERNEL_CONFIG"
+          echo "$KERNEL_CONFIG_SHA256  $config" | sha256sum --check
+          install -D -m 0644 "$config" "upstream/ophub/compile-kernel/tools/config/config-${KERNEL_SERIES%.y}"
+
+      - name: Apply W103D kernel patches (2021 driver compatible)
+        env:
+          KERNEL_SERIES: ${{ needs.resolve-latest.outputs.kernel_series }}
+        run: |
+          set -euo pipefail
+          src="upstream/ophub/compile-kernel/kernel/linux-${KERNEL_SERIES}-main"
+
+          # Use kernel_patch.py to apply patches (reusing existing script)
+          # Note: This requires a minimal sources.lock.json for latest build
+          cat > /tmp/sources-latest.lock.json << 'LOCK_EOF'
+          {
+            "ophub": {"commit": "${{ needs.resolve-latest.outputs.ophub_sha }}"},
+            "kernel": {
+              "repository": "ophub/linux-${{ needs.resolve-latest.outputs.kernel_series }}",
+              "commit": "${{ needs.resolve-latest.outputs.kernel_sha }}",
+              "version": "${{ needs.resolve-latest.outputs.kernel_version }}"
+            }
+          }
+          LOCK_EOF
+
+          # Apply patches
+          python3 scripts/kernel_patch.py apply --src "$src" --lock /tmp/sources-latest.lock.json
+
+      - name: Install ARM GNU toolchain
+        env:
+          TOOLCHAIN_URL: ${{ needs.resolve-latest.outputs.toolchain_url }}
+          TOOLCHAIN_ASSET: ${{ needs.resolve-latest.outputs.toolchain_asset }}
+          TOOLCHAIN_SHA256: ${{ needs.resolve-latest.outputs.toolchain_sha256 }}
+        run: |
+          set -euo pipefail
+          toolchain_root="upstream/ophub/compile-kernel/tools/toolchain"
+          mkdir -p "$toolchain_root"
+          curl --fail --location --retry 3 "$TOOLCHAIN_URL" -o "$RUNNER_TEMP/$TOOLCHAIN_ASSET"
+          echo "$TOOLCHAIN_SHA256  $RUNNER_TEMP/$TOOLCHAIN_ASSET" | sha256sum --check
+          tar -xJf "$RUNNER_TEMP/$TOOLCHAIN_ASSET" -C "$toolchain_root"
+          test -x "$toolchain_root/${TOOLCHAIN_ASSET%.tar.xz}/bin/aarch64-none-linux-gnu-gcc"
+          mkdir -p outputs
+          "$toolchain_root/${TOOLCHAIN_ASSET%.tar.xz}/bin/aarch64-none-linux-gnu-gcc" --version | head -n1 | tee outputs/toolchain-version.txt
+
+      - name: Compile kernel packages from latest source
+        env:
+          KERNEL_VERSION: ${{ needs.resolve-latest.outputs.kernel_version }}
+          CONTAINER_DIGEST: ${{ needs.resolve-latest.outputs.container_digest }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes docker.io
+          cd upstream/ophub
+          sudo bash ./recompile \
+            -r "ophub/linux-${{ needs.resolve-latest.outputs.kernel_series }}" \
+            -k "$KERNEL_VERSION" \
+            -a false \
+            -m all \
+            -t gcc \
+            -z xz \
+            -d false \
+            -i "ophub/armbian-resolute@$CONTAINER_DIGEST"
+
+          # Move outputs
+          src="compile-kernel/kernel/linux-${{ needs.resolve-latest.outputs.kernel_series }}-main"
+          mkdir -p ../../outputs/kernel-debs
+          mv "output"/*.deb ../../outputs/kernel-debs/
+
+          # Verify and document
+          cd ../../outputs/kernel-debs
+          ls -lh
+          sha256sum *.deb | tee checksums.txt
+
+      - name: Create kernel metadata manifest
+        env:
+          OPHUB_SHA: ${{ needs.resolve-latest.outputs.ophub_sha }}
+          KERNEL_SHA: ${{ needs.resolve-latest.outputs.kernel_sha }}
+          KERNEL_SERIES: ${{ needs.resolve-latest.outputs.kernel_series }}
+          KERNEL_VERSION: ${{ needs.resolve-latest.outputs.kernel_version }}
+        run: python3 scripts/create_kernel_manifest.py outputs/kernel-debs
+
+      - name: Upload compiled kernel packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-latest-kernel-${{ github.run_id }}
+          path: outputs/kernel-debs/
+          retention-days: 30
+
+  build-latest-usb-image:
+    needs: [resolve-latest, compile-latest-kernel]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Download compiled kernel
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: w103d-latest-kernel-${{ github.run_id }}
+          path: outputs/kernel-debs
+
+      - name: Download latest Ophub base image
+        env:
+          BASE_URL: ${{ needs.resolve-latest.outputs.base_image_url }}
+          BASE_SHA256: ${{ needs.resolve-latest.outputs.base_image_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p downloads
+          curl --fail --location --retry 3 "$BASE_URL" -o downloads/base.img.gz
+          echo "$BASE_SHA256  downloads/base.img.gz" | sha256sum --check
+          gunzip downloads/base.img.gz
+          mv downloads/base.img outputs/ophub-base.img
+
+      - name: Checkout latest Ophub for boot scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ophub/amlogic-s9xxx-armbian
+          ref: ${{ needs.resolve-latest.outputs.ophub_sha }}
+          path: upstream/ophub
+
+      - name: Assemble W103D USB burning image (2021 Wi-Fi driver)
+        env:
+          KERNEL_VERSION: ${{ needs.resolve-latest.outputs.kernel_version }}
+        run: |
+          set -euo pipefail
+
+          # Create kernel archive from debs (mimicking ophub's output format)
+          cd outputs/kernel-debs
+          kernel_version="${KERNEL_VERSION}"
+          tar -cJf "../kernel-${kernel_version}.tar.xz" *.deb kernel-manifest.json
+          cd ../..
+
+          # Run assembly with 2021 Wi-Fi firmware (already in repo)
+          sudo python3 scripts/assemble_latest_usb.py \
+            --base-image outputs/ophub-base.img \
+            --kernel-archive "outputs/kernel-${kernel_version}.tar.xz" \
+            --kernel-version "$kernel_version" \
+            --ophub-boot-cmd upstream/ophub/build-armbian/armbian-files/platform-files/amlogic/bootfs/boot-emmc.cmd \
+            --wifi-firmware-config config/wifi-firmware.lock.json \
+            --output-template "outputs/W103D_Ophub-Latest_Armbian_{armbian_version}_Kernel-{kernel_version}.img"
+
+      - name: Compress and verify final image
+        run: |
+          set -euo pipefail
+          cd outputs
+          image=$(ls W103D_Ophub-Latest_*.img)
+          echo "Compressing $image..."
+          xz -9 -T0 "$image"
+          sha256sum "${image}.xz" | tee checksums.txt
+          ls -lh "${image}.xz"
+
+      - name: Upload latest W103D USB image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-latest-ophub-${{ github.run_id }}
+          path: |
+            outputs/W103D_Ophub-Latest_*.img.xz
+            outputs/checksums.txt
+          retention-days: 90
+
+      - name: Create release for latest build
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPHUB_SHA: ${{ needs.resolve-latest.outputs.ophub_sha }}
+          KERNEL_SHA: ${{ needs.resolve-latest.outputs.kernel_sha }}
+          KERNEL_SERIES: ${{ needs.resolve-latest.outputs.kernel_series }}
+          KERNEL_VERSION: ${{ needs.resolve-latest.outputs.kernel_version }}
+          KERNEL_META_SHA: ${{ needs.resolve-latest.outputs.kernel_meta_sha }}
+        run: |
+          set -euo pipefail
+          cd outputs
+          image_file=$(ls W103D_Ophub-Latest_*.img.xz)
+
+          release_tag="latest-ophub-$(date +%Y%m%d)"
+          release_name="W103D Latest Ophub Build ($(date +%Y-%m-%d))"
+
+          # Create release notes using printf to avoid heredoc YAML issues
+          {
+            echo "# W103D Latest Ophub Build"
+            echo ""
+            echo "**Build Date**: $(date +%Y-%m-%d)"
+            echo "**Build Type**: Rolling (latest ophub/amlogic-s9xxx-armbian)"
+            echo "**Wi-Fi Driver**: 2021 MT7663 firmware (factory-extracted)"
+            echo ""
+            echo "## Components"
+            echo "| Component | Version |"
+            echo "|-----------|---------|"
+            echo "| ophub/amlogic-s9xxx-armbian | \`${OPHUB_SHA}\` |"
+            echo "| Kernel | linux-${KERNEL_SERIES} @ \`${KERNEL_SHA}\` (v${KERNEL_VERSION}) |"
+            echo "| Kernel Config | ophub/kernel @ \`${KERNEL_META_SHA}\` |"
+            echo ""
+            echo "## Installation"
+            echo "Flash to USB drive and burn to W103D eMMC using standard procedure."
+            echo ""
+            echo "## Notes"
+            echo "- This is a **rolling build** using the latest upstream Ophub code"
+            echo "- Wi-Fi firmware is the 2021 factory-extracted version (stable, proven)"
+            echo "- Built automatically weekly or on-demand"
+          } > release-notes.md
+
+          # Create or update release
+          gh release create "$release_tag" \
+            --title "$release_name" \
+            --notes-file release-notes.md \
+            --target main \
+            "$image_file" \
+            checksums.txt \
+            || gh release upload "$release_tag" "$image_file" checksums.txt --clobber
