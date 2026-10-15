@@ -230,8 +230,7 @@ jobs:
           cp "$BASE_IMAGE_LOCK" outputs/provenance/base-image.lock.json
           cp "$report" outputs/provenance/system-image-verification.json
           cp "$RUNNER_TEMP/system-run.json" outputs/provenance/system-source-run.json
-          cp "$WIFI_FIRMWARE_DIR/manifest.json" outputs/provenance/wifi-firmware-manifest.json
-          cp "$RUNNER_TEMP/reference-wifi-audit.json" outputs/provenance/reference-wifi-audit.json
+          cp config/wifi-firmware.lock.json outputs/provenance/wifi-firmware.lock.json
           echo "SOURCES_LOCK=$GITHUB_WORKSPACE/outputs/provenance/sources.lock.json" >> "$GITHUB_ENV"
           echo "KERNEL_MANIFEST=$GITHUB_WORKSPACE/outputs/provenance/kernel-input-manifest.json" >> "$GITHUB_ENV"
           echo "BASE_IMAGE_LOCK=$GITHUB_WORKSPACE/outputs/provenance/base-image.lock.json" >> "$GITHUB_ENV"
@@ -287,8 +286,8 @@ jobs:
           import json, os
           from pathlib import Path
           artifact=json.load(open('outputs/uploaded-artifact-metadata.json'))
-          expected=next(Path('outputs').glob('*USB_Burning_Tool.img')).name
-          if artifact.get('id') != int(os.environ['ARTIFACT_ID']) or artifact.get('name') != expected or artifact.get('expired'):
+          expected_name=f"w103d-usb-burning-tool-image-{os.environ['GITHUB_RUN_ID']}"
+          if artifact.get('id') != int(os.environ['ARTIFACT_ID']) or artifact.get('name') != expected_name or artifact.get('expired'):
               raise SystemExit(f"raw IMG artifact metadata mismatch: {artifact}")
           PY
           mkdir -p "$RUNNER_TEMP/artifact-readback"
