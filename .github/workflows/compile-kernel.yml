@@ -9,6 +9,11 @@ on:
         type: boolean
         required: true
         default: false
+      patch_config:
+        description: "Kernel patch config file (default: kernel-patches.json for v23, kernel-patches-stock.json for stock)"
+        type: string
+        required: false
+        default: "config/kernel-patches.json"
       pipeline_id:
         description: "Orchestrator correlation token (leave blank for manual runs)"
         required: false
@@ -47,6 +52,7 @@ jobs:
         env:
           KERNEL_SERIES: ${{ steps.lock.outputs.kernel_series }}
           KERNEL_SHA: ${{ steps.lock.outputs.kernel_sha }}
+          PATCH_CONFIG: ${{ inputs.patch_config }}
         run: |
           set -euo pipefail
           # Fetch only the locked commit, without blobs, and materialise just the
@@ -55,11 +61,13 @@ jobs:
           git init -q "$src"
           git -C "$src" remote add origin "https://github.com/ophub/linux-${KERNEL_SERIES}.git"
           git -C "$src" fetch -q --depth=1 --filter=blob:none origin "$KERNEL_SHA"
-          paths=$(python3 -c 'import json,re; c=json.load(open("config/kernel-patches.json")); print(" ".join(sorted({f for p in c["patches"] for f in re.findall(r"^diff --git a/(\S+) b/", open(p["path"]).read(), re.M)})))')
-          git -C "$src" sparse-checkout set --no-cone $paths
+          paths=$(python3 -c "import json,re; c=json.load(open('${PATCH_CONFIG}')); print(' '.join(sorted({f for p in c['patches'] for f in re.findall(r'^diff --git a/(\S+) b/', open(p['path']).read(), re.M)})))" || echo "")
+          if [ -n "$paths" ]; then
+            git -C "$src" sparse-checkout set --no-cone $paths
+          fi
           git -C "$src" checkout -q --detach FETCH_HEAD
           test "$(git -C "$src" rev-parse HEAD)" = "$KERNEL_SHA"
-          python3 scripts/kernel_patch.py check --src "$src" --lock "$RUNNER_TEMP/sources.lock.json"
+          python3 scripts/kernel_patch.py check --src "$src" --lock "$RUNNER_TEMP/sources.lock.json" --config "${PATCH_CONFIG}"
       - name: Preserve source lock
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -90,7 +98,7 @@ jobs:
             outputs/kernel-packages.json
             outputs/sources.lock.json
             outputs/toolchain-version.txt
-          key: w103d-kernel-${{ needs.resolve.outputs.kernel_sha }}-${{ hashFiles('config/kernel.config', 'config/kernel-patches.json', 'patches/w103d/**') }}-${{ needs.resolve.outputs.toolchain_sha256 }}-${{ needs.resolve.outputs.container_digest }}
+          key: w103d-kernel-${{ needs.resolve.outputs.kernel_sha }}-${{ hashFiles('config/kernel.config', inputs.patch_config, 'patches/w103d/**') }}-${{ needs.resolve.outputs.toolchain_sha256 }}-${{ needs.resolve.outputs.container_digest }}
           restore-keys: |
             w103d-kernel-
 
@@ -153,11 +161,13 @@ jobs:
         if: steps.kernel-cache.outputs.cache-hit != 'true'
         env:
           KERNEL_SERIES: ${{ needs.resolve.outputs.kernel_series }}
+          PATCH_CONFIG: ${{ inputs.patch_config }}
         run: |
           set -euo pipefail
           python3 scripts/kernel_patch.py apply \
             --src "upstream/ophub/compile-kernel/kernel/linux-${KERNEL_SERIES}-main" \
-            --lock "$RUNNER_TEMP/sources.lock.json"
+            --lock "$RUNNER_TEMP/sources.lock.json" \
+            --config "${PATCH_CONFIG}"
       - name: Pin recompile to the checked-out Ophub helper
         if: steps.kernel-cache.outputs.cache-hit != 'true'
         run: python3 scripts/prepare_locked_recompile.py --ophub upstream/ophub
@@ -263,7 +273,7 @@ jobs:
             outputs/kernel-packages.json
             outputs/sources.lock.json
             outputs/toolchain-version.txt
-          key: w103d-kernel-${{ needs.resolve.outputs.kernel_sha }}-${{ hashFiles('config/kernel.config', 'config/kernel-patches.json', 'patches/w103d/**') }}-${{ needs.resolve.outputs.toolchain_sha256 }}-${{ needs.resolve.outputs.container_digest }}
+          key: w103d-kernel-${{ needs.resolve.outputs.kernel_sha }}-${{ hashFiles('config/kernel.config', inputs.patch_config, 'patches/w103d/**') }}-${{ needs.resolve.outputs.toolchain_sha256 }}-${{ needs.resolve.outputs.container_digest }}
 
       - name: Upload kernel build results and diagnostics
         if: always()

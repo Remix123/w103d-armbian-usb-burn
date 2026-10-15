@@ -20,15 +20,14 @@ import re
 import subprocess
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CONFIG = REPO_ROOT / "config/kernel-patches.json"
 
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def load_patches() -> list[dict]:
-    config = json.loads(CONFIG.read_text())
+def load_patches(config_path: Path) -> list[dict]:
+    config = json.loads(config_path.read_text())
     patches = []
     for entry in config["patches"]:
         path = REPO_ROOT / entry["path"]
@@ -42,8 +41,7 @@ def load_patches() -> list[dict]:
             raise SystemExit(f"kernel patch {entry['path']} touches no files")
         patches.append({"path": entry["path"], "sha256": actual, "files": files,
                         "description": entry.get("description", "")})
-    if not patches:
-        raise SystemExit("config/kernel-patches.json lists no patches")
+    # Empty patches list is valid (stock kernel build)
     return patches
 
 
@@ -69,20 +67,27 @@ def main() -> int:
     ap.add_argument("command", choices=("check", "apply", "verify-applied"))
     ap.add_argument("--src", type=Path, required=True, help="kernel source checkout (git work tree)")
     ap.add_argument("--lock", type=Path, required=True, help="sources.lock.json")
+    ap.add_argument("--config", type=Path, default=REPO_ROOT / "config/kernel-patches.json",
+                    help="patch config file (default: config/kernel-patches.json)")
     args = ap.parse_args()
     src = args.src.resolve(strict=True)
-    patches = load_patches()
+    config_path = args.config if args.config.is_absolute() else REPO_ROOT / args.config
+    if not config_path.is_file():
+        raise SystemExit(f"patch config not found: {config_path}")
+    patches = load_patches(config_path)
 
     if args.command == "check":
-        series = json.loads(CONFIG.read_text()).get("kernel_series")
+        series = json.loads(config_path.read_text()).get("kernel_series")
         locked_repo = json.loads(args.lock.read_text())["kernel"]["repository"]
         if series and locked_repo != f"ophub/linux-{series}":
             raise SystemExit(f"Ophub now builds W103D from {locked_repo}, but the W103D patch set targets "
                              f"linux-{series}; port and re-test the patch before building")
-        for patch in patches:
-            git_apply(src, patch["path"], "--check")
+        if patches:  # Skip patch application for empty (stock) config
+            for patch in patches:
+                git_apply(src, patch["path"], "--check")
         lock = json.loads(args.lock.read_text())
         lock["kernel_patches"] = patches
+        lock["kernel_patch_config"] = str(config_path.relative_to(REPO_ROOT))
         args.lock.write_text(json.dumps(lock, indent=2) + "\n")
         print(json.dumps({"kernel_patches_check": "passed", "patches": patches}, indent=2))
         return 0
@@ -91,12 +96,14 @@ def main() -> int:
     if [(p["path"], p["sha256"]) for p in locked] != [(p["path"], p["sha256"]) for p in patches]:
         raise SystemExit(f"patch set in the repository differs from the source lock: {locked} vs {patches}")
     if args.command == "apply":
+        if patches:
+            for patch in patches:
+                git_apply(src, patch["path"], "--check")
+            for patch in patches:
+                git_apply(src, patch["path"])
+    if patches:
         for patch in patches:
-            git_apply(src, patch["path"], "--check")
-        for patch in patches:
-            git_apply(src, patch["path"])
-    for patch in patches:
-        git_apply(src, patch["path"], "--reverse", "--check")
+            git_apply(src, patch["path"], "--reverse", "--check")
     changed = subprocess.run(["git", "-C", str(src), "diff", "--stat"], check=True, text=True,
                              stdout=subprocess.PIPE).stdout
     print(changed, end="")
