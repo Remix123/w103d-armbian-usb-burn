@@ -252,7 +252,7 @@ jobs:
             --version "$KERNEL_VERSION" \
             --out outputs/kernel-packages.json
           cp "$RUNNER_TEMP/sources.lock.json" outputs/sources.lock.json
-          cp outputs/toolchain-version.txt outputs/toolchain-version.txt
+          cp outputs-toolchain-version.txt outputs/toolchain-version.txt
 
       - name: Save kernel compilation cache
         if: steps.kernel-cache.outputs.cache-hit != 'true'
