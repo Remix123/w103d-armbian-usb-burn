@@ -20,6 +20,9 @@ import zlib
 
 from prepare_kernel_input import safe_members, sha256
 
+# Ensure paths relative to "config/" resolve from repository root, even under sudo
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 VENDOR_COMPONENTS = [
     "DDR.USB", "_aml_dtb.PARTITION", "boot.PARTITION", "recovery.PARTITION",
     "dtbo.PARTITION", "vbmeta.PARTITION", "logo.PARTITION", "platform.conf",
@@ -161,7 +164,7 @@ def install_wifi_firmware(root: Path, lock: dict) -> list[dict]:
         raise SystemExit(f"rebuilt rootfs has no firmware directory /{lock['install_dir']}")
     records = []
     for entry in lock["files"]:
-        repo_path = Path(entry["repo_path"])
+        repo_path = REPO_ROOT / entry["repo_path"]
         if not repo_path.is_file() or hash_file(repo_path) != entry["sha256"]:
             raise SystemExit(f"Wi-Fi firmware {entry['name']} is missing or differs from config/wifi-firmware.lock.json at {repo_path}")
         target = target_dir / entry["name"]
@@ -224,7 +227,7 @@ def main() -> int:
     for name in VENDOR_COMPONENTS:
         if not (reference / name).is_file():
             raise SystemExit(f"reference packer output is missing preserved component {name}")
-    layout = json.loads(Path("config/reference-layout-lock.json").read_text())
+    layout = json.loads((REPO_ROOT / "config/reference-layout-lock.json").read_text())
     if (reference / "image.cfg").read_text() != layout["image_cfg"]:
         raise SystemExit("reference image.cfg differs from the preflight-approved exact layout")
     hashes = layout["component_sha256"]
@@ -299,7 +302,7 @@ def main() -> int:
         run("rsync", "-aHAX", "--numeric-ids", "--exclude=/boot/*", f"{source_root}/", f"{root_mount}/", capture=False)
         if shutil.disk_usage(root_mount).used > (4 << 30) * 0.92:
             raise SystemExit("rebuilt root filesystem payload leaves insufficient ext4 reserve")
-        wifi_lock = json.loads(Path("config/wifi-firmware.lock.json").read_text())
+        wifi_lock = json.loads((REPO_ROOT / "config/wifi-firmware.lock.json").read_text())
         wifi_firmware = install_wifi_firmware(root_mount, wifi_lock)
         fstab = root_mount / "etc/fstab"
         fstab.write_text("LABEL=W103D_ROOT / ext4 defaults,noatime,nodiratime,errors=remount-ro 0 1\nLABEL=W103D_BOOT /boot vfat defaults 0 2\ntmpfs /tmp tmpfs defaults,nosuid 0 0\n")
@@ -447,7 +450,7 @@ def main() -> int:
     run(a.packer, "-r", reference / "image.cfg", reference, a.output)
     run(a.packer, "-c", a.output)
     report = {
-        "reference_zip_image_sha256": json.loads(Path("config/reference.lock.json").read_text())["image_sha256"],
+        "reference_zip_image_sha256": json.loads((REPO_ROOT / "config/reference.lock.json").read_text())["image_sha256"],
         "reference_component_sha256": {name: hash_file(reference / name) for name in VENDOR_COMPONENTS},
         "system_input_sha256": hash_file(a.system_image), "kernel_archive_sha256": hash_file(a.kernel_archive),
         "kernel_release": release, "wifi_firmware": wifi_firmware,
