@@ -12,7 +12,7 @@
 
 - 最近一次完整的一键构建 [36696946381](https://github.com/Remix123/w103d-armbian-usb-burn/actions/runs/36696946381)（2026-09-30）成功，产出 `W103D_Armbian_26.11.0_6.18.54_USB_Burning_Tool`。该次产出的系统已在实体 W103D 上从 eMMC 启动运行；当时尚未包含 Wi-Fi 补丁和 2021 版固件。
 - 2026-10 起，内核编译会应用 `patches/w103d/` 中的 mt7663s 补丁（见 §3.4），USB 镜像改用 2021 版 MT7663 N9 固件（见 §5.2），成品发布到 GitHub Release（只保留最新一个，见 §4.5）。这些改动需要下一次一键构建来产出新的 Release。
-- 补丁 v22 + 2021 固件已在实体 W103D（6.18.54-ophub）上做过空闲、已连接扫描（两频段）、5G/2.4G 互切和重载回归；v22 在 2020 固件（3.1.1）上保持 v18 行为。新内核版本（如 6.18.56）的首个镜像仍建议上板做一次 Wi-Fi 冒烟测试。
+- 补丁 v23 + 2021 固件已在实体 W103D（6.18.54-ophub）上做过空闲、已连接扫描（两频段）、5G/2.4G 互切和重载回归；v23 在 2020 固件（3.1.1）上保持 v18 的授权行为。v23 相对 v22 修了 5G 丢包：这块硬件没有多速率重传（描述符只有一个速率字段，WTBL 速率表访问不到），原来程序化 minstrel 速率链的第一项（最高吞吐），一帧发不出去就丢；改成取最后一个有效项（最可靠速率）后，同一时段交错实测丢包从 23.1% 降到 0.8%。新内核版本（如 6.18.56）的首个镜像仍建议上板做一次 Wi-Fi 冒烟测试。
 
 Amlogic packer 在 [toolchain.lock.json](../config/toolchain.lock.json) 中固定：Khadas `utils` commit `a3604ed6d6863d1946d26d0ac8e765aef6f17430`，`aml_image_v2_packer` SHA-256 `8123b1295abb3262c76b650ba024975e38aedfd49b19f59a09f5920738ef1597`。它是独立的 Amlogic 容器格式打包工具，不是系统或内核源码；需 GitHub x86_64 Linux runner 的 IA32 执行支持。Pigeon W103D burn 分支仅作打包流程参考。USB job 的真实 packer `-c`、`-d`、`-r` 结果由 GitHub run 日志证实；本地 macOS 不运行该工具。
 

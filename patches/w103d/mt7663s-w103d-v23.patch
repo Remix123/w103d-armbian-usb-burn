@@ -1,5 +1,5 @@
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
-index 9090b95a6..46fdbfb53 100644
+index 9090b95a6..56961c2ce 100644
 --- a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
 +++ b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
 @@ -54,8 +54,13 @@ struct mt7663s_w103d_intr_state {
@@ -442,7 +442,40 @@ index 9090b95a6..46fdbfb53 100644
  		 */
  		rate.idx = 0;
  		rate.count = 8;
-@@ -1801,13 +2052,25 @@ mt7663s_w103d_fix_5g_tx_rate(struct mt7615_dev *dev,
+@@ -1794,20 +2045,55 @@ mt7663s_w103d_fix_5g_tx_rate(struct mt7615_dev *dev,
+ 		rcu_read_lock();
+ 		rates = rcu_dereference(sta->rates);
+ 		if (rates) {
+-			rate.idx = rates->rate[0].idx;
+-			rate.count = rates->rate[0].count;
+-			rate.flags = rates->rate[0].flags;
++			int i, slot = 0;
++
++			/* The descriptor carries a single rate and the WTBL rate
++			 * table is unreachable, so the hardware repeats that one
++			 * rate REM_TX_COUNT times: there is no multi-rate retry.
++			 * minstrel picks rate[0] for throughput on the assumption
++			 * that rate[1..3] catch its failures, so programming
++			 * rate[0] here sends every attempt at a rate that is
++			 * expected to fail part of the time, and the frame is
++			 * dropped instead of falling back (observed on 5 GHz:
++			 * TX_COUNT=5, all unacked, at VHT-MCS9 NSS2 40 MHz).
++			 * Without a retry chain the last valid entry - minstrel's
++			 * most reliable rate - is the correct choice; it also
++			 * measured faster, because retries cost more airtime than
++			 * the lower rate.
++			 */
++			for (i = ARRAY_SIZE(rates->rate) - 1; i > 0; i--) {
++				if (rates->rate[i].idx >= 0 &&
++				    rates->rate[i].count) {
++					slot = i;
++					break;
++				}
++			}
++			rate.idx = rates->rate[slot].idx;
++			rate.count = rates->rate[slot].count;
++			rate.flags = rates->rate[slot].flags;
+ 		}
  		rcu_read_unlock();
  	}
  
@@ -469,7 +502,7 @@ index 9090b95a6..46fdbfb53 100644
  	rateval = mt7663s_w103d_tx_rate_val(&dev->mphy, &rate,
  					    info->flags & IEEE80211_TX_CTL_STBC,
  					    &bw);
-@@ -1860,8 +2123,13 @@ int mt7663s_w103d_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
+@@ -1860,8 +2146,13 @@ int mt7663s_w103d_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
  
  	ret = mt7663_usb_sdio_tx_prepare_skb(mdev, txwi_ptr, qid, wcid, sta,
  					     tx_info);
@@ -485,7 +518,7 @@ index 9090b95a6..46fdbfb53 100644
  		return ret;
  
  	/* The shared SDIO rate worker writes the WTBL rate table through blocked
-@@ -2167,6 +2435,86 @@ static u8 mt7663s_w103d_extract_frame_channel(const void *data, int len)
+@@ -2167,6 +2458,102 @@ static u8 mt7663s_w103d_extract_frame_channel(const void *data, int len)
  	return 0;
  }
  
@@ -541,11 +574,27 @@ index 9090b95a6..46fdbfb53 100644
 +	if (!sta)
 +		goto out;
 +
++	/* Match against the entry the TX path actually programmed (the
++	 * last valid one, see mt7663s_w103d_fix_5g_tx_rate()), so the
++	 * bandwidth and guard-interval flags reported to minstrel belong
++	 * to the rate that was really used.
++	 */
 +	rates = rcu_dereference(sta->rates);
-+	if (rates && rates->rate[0].idx == r->idx &&
-+	    (rates->rate[0].flags & (IEEE80211_TX_RC_MCS |
-+				     IEEE80211_TX_RC_VHT_MCS)) == r->flags)
-+		r->flags = rates->rate[0].flags;
++	if (rates) {
++		int i, slot = 0;
++
++		for (i = ARRAY_SIZE(rates->rate) - 1; i > 0; i--) {
++			if (rates->rate[i].idx >= 0 &&
++			    rates->rate[i].count) {
++				slot = i;
++				break;
++			}
++		}
++		if (rates->rate[slot].idx == r->idx &&
++		    (rates->rate[slot].flags & (IEEE80211_TX_RC_MCS |
++						IEEE80211_TX_RC_VHT_MCS)) == r->flags)
++			r->flags = rates->rate[slot].flags;
++	}
 +
 +	r->count = max_t(u8, FIELD_GET(MT_TXS3_TX_COUNT,
 +				       le32_to_cpu(txs[3])), 1);
@@ -572,7 +621,7 @@ index 9090b95a6..46fdbfb53 100644
  bool mt7663s_w103d_rx_check(struct mt76_dev *mdev, void *data, int len)
  {
  	struct mt7615_dev *dev = container_of(mdev, struct mt7615_dev, mt76);
-@@ -2180,6 +2528,14 @@ bool mt7663s_w103d_rx_check(struct mt76_dev *mdev, void *data, int len)
+@@ -2180,6 +2567,14 @@ bool mt7663s_w103d_rx_check(struct mt76_dev *mdev, void *data, int len)
  	rxd1 = le32_to_cpu(rxd[1]);
  	type = FIELD_GET(MT_RXD0_PKT_TYPE, rxd0);
  
@@ -587,7 +636,7 @@ index 9090b95a6..46fdbfb53 100644
  	if (mt7663s_w103d_active() && type == PKT_TYPE_TXRX_NOTIFY) {
  		dev_dbg(mdev->dev,
  			      "W103D: ignoring SDIO TXRX_NOTIFY without tx_cleanup\n");
-@@ -2234,23 +2590,32 @@ struct mt7663s_w103d_rx_delba_event {
+@@ -2234,23 +2629,32 @@ struct mt7663s_w103d_rx_delba_event {
  	u8 reserved[2];
  } __packed;
  
@@ -630,7 +679,7 @@ index 9090b95a6..46fdbfb53 100644
  
  	if (rxd->eid == W103D_MCU_EVENT_RX_ADDBA) {
  		struct mt7663s_w103d_rx_addba_event *event;
-@@ -2267,14 +2632,12 @@ mt7663s_w103d_handle_rx_ba_event(struct mt76_dev *mdev, struct sk_buff *skb)
+@@ -2267,14 +2671,12 @@ mt7663s_w103d_handle_rx_ba_event(struct mt76_dev *mdev, struct sk_buff *skb)
  		ssn = IEEE80211_SEQ_TO_SN(le16_to_cpu(event->start_seq));
  		win_size = clamp_t(u16, win_size, 1, 64);
  
@@ -645,7 +694,7 @@ index 9090b95a6..46fdbfb53 100644
  
  		dev_dbg_ratelimited(mdev->dev,
  			"W103D: firmware RX BA start wcid=%u tid=%u ssn=%u win=%u result=%d\n",
-@@ -2290,37 +2653,62 @@ mt7663s_w103d_handle_rx_ba_event(struct mt76_dev *mdev, struct sk_buff *skb)
+@@ -2290,37 +2692,62 @@ mt7663s_w103d_handle_rx_ba_event(struct mt76_dev *mdev, struct sk_buff *skb)
  		if (tid >= IEEE80211_NUM_TIDS)
  			goto malformed;
  
