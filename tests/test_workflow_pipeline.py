@@ -149,6 +149,24 @@ class ArtifactTests(unittest.TestCase):
                 self.assertEqual(doc['packages'][0]['architecture'],'arm64')
 
 
+    def test_manifest_real_ophub_package_names_and_wrong_family(self):
+        for family in ('meson64', 'rockchip64'):
+            with self.subTest(family=family), tempfile.TemporaryDirectory() as td:
+                base=Path(td)
+                for name in ('linux-image', 'linux-dtb-'+family):
+                    (base/(name+'.deb')).write_bytes(b'fixture')
+                def fake_run(args, **kwargs):
+                    field=args[-1];name=Path(args[-2]).stem
+                    value={'Package':name+'-ophub','Version':'6.18.56-1-ophub','Architecture':'arm64'}[field]
+                    return subprocess.CompletedProcess(args,0,stdout=value+'\n')
+                with patch.object(sys,'argv',['manifest','--deb-dir',str(base),'--version','6.18.56']),patch.object(inventory.subprocess,'run',side_effect=fake_run):
+                    if family=='meson64':
+                        self.assertEqual(inventory.main(),0)
+                        self.assertIn('linux-dtb-meson64-ophub',json.loads((base/'kernel-manifest.json').read_text())['dtb_packages'])
+                    else:
+                        with self.assertRaises(SystemExit):inventory.main()
+
+
 class WorkflowContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -53,7 +53,9 @@ def main() -> int:
            "hardware_tested": False}
     if any(p["version"] != f"{args.version}-1-ophub" or p["architecture"] != "arm64" for p in packages):
         raise SystemExit("kernel package version or architecture mismatch")
-    if "linux-dtb-meson64" not in doc["dtb_packages"]:
+    # Ophub may suffix the Debian Package field with -ophub while retaining
+    # the historical .deb filename. Keep the board-family check exact.
+    if not {"linux-dtb-meson64", "linux-dtb-meson64-ophub"}.intersection(doc["dtb_packages"]):
         raise SystemExit("kernel packages lack the W103D meson64 DTB package")
     if args.runtime_archive:
         doc["runtime_archive"] = {"file": args.runtime_archive.name,
