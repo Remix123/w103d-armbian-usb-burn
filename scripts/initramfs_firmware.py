@@ -94,6 +94,16 @@ def replace_copies(tree: Path, rootfs: Path, lock: dict, *, install_pair: bool) 
 
 
 def archive_layers(unpacked: Path) -> list[Path]:
+    # unmkinitramfs writes a single archive directly into the destination;
+    # early+main archives instead get named subdirectories. Normalize the
+    # scratch tree only, so the same inspection works for both formats.
+    if (unpacked / 'init').exists() or (unpacked / 'init').is_symlink():
+        entries = list(unpacked.iterdir())
+        temporary = unpacked / '.normalize-main'
+        temporary.mkdir(exist_ok=False)
+        for entry in entries:
+            entry.rename(temporary / entry.name)
+        temporary.rename(unpacked / 'main')
     names = {p.name for p in unpacked.iterdir()}
     if 'main' not in names or any(not re.fullmatch(r'main|early(?:[2-9]|[1-9][0-9]+)?', n) for n in names):
         raise ValueError(f"unexpected unmkinitramfs layout: {sorted(names)}")
