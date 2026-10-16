@@ -57,7 +57,7 @@ def git_apply(src: Path, patch: str, *extra: str) -> None:
 def lock_entries(lock_path: Path) -> list[dict]:
     lock = json.loads(lock_path.read_text())
     entries = lock.get("kernel_patches")
-    if not entries:
+    if not isinstance(entries, list):
         raise SystemExit(f"source lock {lock_path} has no kernel_patches entry; run the check stage first")
     return entries
 

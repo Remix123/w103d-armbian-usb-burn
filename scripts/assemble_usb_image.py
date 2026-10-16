@@ -393,10 +393,11 @@ def main() -> int:
             run("mcopy", "-s", "-i", boot_raw, item, "::/")
         # First-boot SSH host keys and machine ID are regenerated on the device.
         ophub_release = root_mount / "etc/ophub-release"
-        release_text = ophub_release.read_text(errors="replace")
+        from driver_variant import configure_tar_feed
+        release_text = configure_tar_feed(ophub_release.read_text(errors="replace"), source_lock)
         if "DISK_TYPE='usb'" in release_text:
             release_text = release_text.replace("DISK_TYPE='usb'", "DISK_TYPE='emmc'")
-            ophub_release.write_text(release_text)
+        ophub_release.write_text(release_text)
         if "DISK_TYPE='emmc'" not in ophub_release.read_text(errors="replace"):
             raise SystemExit("/etc/ophub-release did not accept DISK_TYPE=emmc")
         for generic in (root_mount / "etc/systemd/system/armbian-resize-filesystem.service",

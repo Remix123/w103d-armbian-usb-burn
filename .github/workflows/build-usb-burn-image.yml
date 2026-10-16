@@ -4,6 +4,11 @@ run-name: Assemble W103D USB image (${{ inputs.pipeline_id || 'manual' }})
 on:
   workflow_dispatch:
     inputs:
+      patch_config:
+        description: "Expected driver configuration; blank permits either checked variant for manual runs"
+        required: false
+        type: string
+        default: ""
       system_run_id:
         description: "Successful build-system run containing the Trixie W103D image and verification report"
         required: true
@@ -33,6 +38,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SYSTEM_RUN_ID: ${{ inputs.system_run_id }}
+          EXPECTED_PATCH_CONFIG: ${{ inputs.patch_config }}
         run: |
           set -euo pipefail
           [[ "$SYSTEM_RUN_ID" =~ ^[0-9]+$ ]]
@@ -53,6 +59,9 @@ jobs:
           python3 - <<'PY'
           import json, os
           from pathlib import Path
+          import sys
+          sys.path.insert(0, "scripts")
+          from driver_variant import validate_driver_lock
           root=Path(os.environ['RUNNER_TEMP'])/'system'
           reports=list(root.rglob('system-image-verification.json'))
           manifests=list(root.rglob('kernel-input-manifest.json'))
@@ -63,6 +72,7 @@ jobs:
           if json.loads(reports[0].read_text()).get('image_sha256') is None: raise SystemExit('system image verification report has no image hash')
           manifest=json.loads(manifests[0].read_text())
           lock=json.loads(locks[0].read_text())
+          validate_driver_lock(lock, os.environ.get("EXPECTED_PATCH_CONFIG") or None)
           if manifest.get('ophub_source_lock') != lock: raise SystemExit('system artifact source lock and kernel manifest disagree')
           with open(os.environ['GITHUB_ENV'],'a') as f:
               f.write('SOURCES_LOCK='+str(locks[0])+'\n')
@@ -238,6 +248,7 @@ jobs:
           df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
 
       - name: Independently unpack and verify every final image payload
+        id: verified-image
         run: |
           set -euo pipefail
           image=$(find outputs -maxdepth 1 -type f -name '*USB_Burning_Tool.img' -print -quit)
@@ -249,6 +260,12 @@ jobs:
             --reference-layout config/reference-layout-lock.json \
             --packer "$AMLPACKER" --out outputs/verification-report.json
           sha256sum "$image" > outputs/SHA256SUMS
+
+          python3 - <<'PYCODE'
+          import json, os
+          name=json.load(open('outputs/verification-report.json'))['final_image']
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('image_name='+name+'\n')
+          PYCODE
 
       - name: Preserve unverified candidate after a failed assembly or verifier
         if: failure()
@@ -267,7 +284,7 @@ jobs:
         id: upload-image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: w103d-usb-burning-tool-image-${{ github.run_id }}
+          name: ${{ steps.verified-image.outputs.image_name }}
           path: outputs/*USB_Burning_Tool.img
           archive: false
           if-no-files-found: error
@@ -286,7 +303,7 @@ jobs:
           import json, os
           from pathlib import Path
           artifact=json.load(open('outputs/uploaded-artifact-metadata.json'))
-          expected_name=f"w103d-usb-burning-tool-image-{os.environ['GITHUB_RUN_ID']}"
+          expected_name=json.load(open("outputs/verification-report.json"))["final_image"]
           if artifact.get('id') != int(os.environ['ARTIFACT_ID']) or artifact.get('name') != expected_name or artifact.get('expired'):
               raise SystemExit(f"raw IMG artifact metadata mismatch: {artifact}")
           PY

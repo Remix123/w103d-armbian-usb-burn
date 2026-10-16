@@ -1,131 +1,67 @@
 name: Build and deliver W103D USB image (Stock 2021 driver)
-run-name: Build and deliver W103D USB image (Stock 2021 driver) [${{ github.run_id }}]
+run-name: W103D Stock one-click build (${{ github.run_id }}-${{ github.run_attempt }})
 
 on:
   workflow_dispatch:
     inputs:
       run_all_jobs:
-        description: "Build the entire system: kernel, rootfs, USB image, and delivery package"
-        type: boolean
+        description: "Build stock Ophub driver (no v23 patches), with 2021 N9 firmware"
         required: true
-        default: false
+        type: boolean
+        default: true
+      reuse_system_run_id:
+        description: "Optional successful build-system run to resume from; leave blank for the complete source build"
+        required: false
+        type: string
+        default: ""
+      reuse_usb_run_id:
+        description: "Optional successful USB image run to resume at ZIP delivery; leave blank otherwise"
+        required: false
+        type: string
+        default: ""
 
 permissions:
-  contents: read
-  actions: read
-  id-token: write
+  contents: write
+  actions: write
+
+concurrency:
+  group: w103d-full-source-pipeline
+  cancel-in-progress: false
 
 jobs:
-  orchestrate:
+  build-deliver:
     if: ${{ inputs.run_all_jobs }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-
-      - name: Compile kernel with stock 2021 driver (no v23 patches)
+        with:
+          fetch-depth: 0
+      - name: Run the complete source build and delivery pipeline
+        id: pipeline
         env:
           GH_TOKEN: ${{ github.token }}
           PATCH_CONFIG: config/kernel-patches-stock.json
-        run: |
-          set -euo pipefail
-          echo "Starting kernel compilation with stock driver configuration"
-          gh workflow run compile-kernel.yml \
-            --field run_kernel_build=true \
-            --field patch_config="${PATCH_CONFIG}" \
-            --field pipeline_id="${{ github.run_id }}"
-
-          # Wait for the workflow to start
-          sleep 10
-
-          # Poll until kernel compilation completes
-          while true; do
-            status=$(gh run list --workflow=compile-kernel.yml --limit=1 --json status,conclusion | python3 -c 'import sys, json; r=json.load(sys.stdin)[0]; print(r["conclusion"] if r["status"]=="completed" else "running")')
-            case "$status" in
-              success) echo "✓ Kernel compilation completed"; break ;;
-              running|in_progress|queued) echo "Kernel compilation in progress..."; sleep 60 ;;
-              *) echo "✗ Kernel compilation failed with status: $status"; exit 1 ;;
-            esac
-          done
-
-      - name: Build rootfs
+          REUSE_SYSTEM_RUN_ID: ${{ inputs.reuse_system_run_id }}
+          REUSE_USB_RUN_ID: ${{ inputs.reuse_usb_run_id }}
+        run: python3 scripts/orchestrate_build.py
+      - name: Publish the verified ZIP as the only (latest) W103D release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          echo "Starting rootfs build"
-          gh workflow run build-system.yml \
-            --field run_full_build=true \
-            --field pipeline_id="${{ github.run_id }}"
-
-          sleep 10
-
-          while true; do
-            status=$(gh run list --workflow=build-system.yml --limit=1 --json status,conclusion | python3 -c 'import sys, json; r=json.load(sys.stdin)[0]; print(r["conclusion"] if r["status"]=="completed" else "running")')
-            case "$status" in
-              success) echo "✓ Rootfs build completed"; break ;;
-              running|in_progress|queued) echo "Rootfs build in progress..."; sleep 60 ;;
-              *) echo "✗ Rootfs build failed with status: $status"; exit 1 ;;
-            esac
-          done
-
-      - name: Assemble USB burn image
+        run: python3 scripts/publish_release.py
+      - name: Cancel only this pipeline's unfinished child runs on failure or cancellation
+        if: ${{ always() }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          echo "Starting USB image assembly"
-          gh workflow run build-usb-burn-image.yml \
-            --field run_usb_assembly=true \
-            --field pipeline_id="${{ github.run_id }}"
-
-          sleep 10
-
-          while true; do
-            status=$(gh run list --workflow=build-usb-burn-image.yml --limit=1 --json status,conclusion | python3 -c 'import sys, json; r=json.load(sys.stdin)[0]; print(r["conclusion"] if r["status"]=="completed" else "running")')
-            case "$status" in
-              success) echo "✓ USB image assembly completed"; break ;;
-              running|in_progress|queued) echo "USB image assembly in progress..."; sleep 60 ;;
-              *) echo "✗ USB image assembly failed with status: $status"; exit 1 ;;
-            esac
-          done
-
-      - name: Create delivery package
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          echo "Starting delivery package creation"
-          gh workflow run deliver-zipped-image.yml \
-            --field prepare_delivery=true \
-            --field pipeline_id="${{ github.run_id }}"
-
-          sleep 10
-
-          while true; do
-            status=$(gh run list --workflow=deliver-zipped-image.yml --limit=1 --json status,conclusion | python3 -c 'import sys, json; r=json.load(sys.stdin)[0]; print(r["conclusion"] if r["status"]=="completed" else "running")')
-            case "$status" in
-              success)
-                echo "✓ Delivery package created"
-                # Extract download URL from the completed workflow run
-                run_url=$(gh run list --workflow=deliver-zipped-image.yml --limit=1 --json url --jq '.[0].url')
-                echo "📦 Download the zipped USB image from: $run_url"
-                break ;;
-              running|in_progress|queued) echo "Delivery package creation in progress..."; sleep 60 ;;
-              *) echo "✗ Delivery package creation failed with status: $status"; exit 1 ;;
-            esac
-          done
-
-      - name: Build summary
-        if: always()
-        run: |
-          echo "## Build Summary (Stock 2021 Driver)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Pipeline ID:** \`${{ github.run_id }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "This build uses the stock 2021 Wi-Fi driver without v23 patches." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Workflow Status" >> $GITHUB_STEP_SUMMARY
-          echo "- Kernel compilation: $(gh run list --workflow=compile-kernel.yml --limit=1 --json conclusion --jq '.[0].conclusion // "unknown"')" >> $GITHUB_STEP_SUMMARY
-          echo "- Rootfs build: $(gh run list --workflow=build-system.yml --limit=1 --json conclusion --jq '.[0].conclusion // "unknown"')" >> $GITHUB_STEP_SUMMARY
-          echo "- USB image assembly: $(gh run list --workflow=build-usb-burn-image.yml --limit=1 --json conclusion --jq '.[0].conclusion // "unknown"')" >> $GITHUB_STEP_SUMMARY
-          echo "- Delivery package: $(gh run list --workflow=deliver-zipped-image.yml --limit=1 --json conclusion --jq '.[0].conclusion // "unknown"')" >> $GITHUB_STEP_SUMMARY
+        run: python3 scripts/cleanup_pipeline.py
+      - name: Export the credential-free pipeline provenance report
+        if: ${{ always() }}
+        run: python3 scripts/export_pipeline_state.py
+      - name: Upload pipeline provenance and final result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: w103d-pipeline-result-${{ github.run_id }}
+          path: outputs/pipeline-result.json
+          if-no-files-found: error
+          retention-days: 90

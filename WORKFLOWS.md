@@ -1,107 +1,63 @@
-# W103D Armbian Build System
+# W103D 两种驱动的构建入口
 
-本仓库包含两个完整的 W103D USB 烧录镜像构建流程：
+两个入口均构建 Ophub 当前支持的 W103D 内核，以及 Trixie/server/ext4 系统。
 
-## Workflows
+| Actions 名称 | 文件 | 驱动选择 |
+|---|---|---|
+| Build and deliver W103D USB image | `.github/workflows/build-and-deliver.yml` | `config/kernel-patches.json`，应用本仓库 v23 补丁 |
+| Build and deliver W103D USB image (Stock 2021 driver) | `.github/workflows/build-usb-stock-driver.yml` | `config/kernel-patches-stock.json`，空补丁列表，使用锁定版本的 Ophub 原版驱动 |
 
-### 1. Build and deliver W103D USB image (v23 driver)
-**文件**: `.github/workflows/orchestrate_build.yml`
+Stock 名称中的 2021 指两版共同使用的 N9 固件，不代表回退到一份 2021 年 Linux 驱动源码。两版固件均受 `config/wifi-firmware.lock.json` 约束。入口名称为兼容既有 Actions 操作习惯保留。
 
-使用改进的 v23 Wi-Fi 驱动（包含 reason=4 空闲断连修复补丁）。
+## 编排及恢复
 
-**特性**:
-- 应用 W103D 专用内核补丁（包括 v23 Wi-Fi 驱动修复）
-- 内核版本：动态从 ophub 获取（当前 6.18.y）
-- 内核编译缓存：基于 kernel_sha + config + 补丁 + 工具链构建 cache key
+两个入口均运行 `scripts/orchestrate_build.py`，顺序为：
 
-**触发**: 手动触发，选择 `run_all_jobs=true`
+1. `reference-preflight.yml`：验证参考包。
+2. `compile-kernel.yml`：解析并固定源码、配置、工具链、容器和所选补丁；预检后编译/复用完整缓存。
+3. `build-system.yml`：使用明确的 `kernel_run_id` 消费内核 artifact，重建最新发布的官方 Trixie 基础系统。
+4. `build-usb-burn-image.yml`：使用明确的 `system_run_id` 组装、独立回读验证 USB IMG。
+5. `deliver-zipped-image.yml`：使用明确的 `usb_run_id` 生成并回读验证最终 ZIP。
+6. 父工作流验证 ZIP 后发布对应驱动的 Release。
 
-### 2. Build and deliver W103D USB image (Stock 2021 driver)
-**文件**: `.github/workflows/build-usb-stock-driver.yml`
+每个子运行通过 workflow 路径、触发分支、HEAD SHA 和 `pipeline-<run-id>-<attempt>` 共同关联。不能用最近一次运行代替本流水线子运行。父流程失败或取消后，只清理自己关联的子运行。两个入口共享父流程并发组，避免同时占用整套构建资源。
 
-使用原版 2021 Wi-Fi 驱动（无 v23 补丁）。
+Stock 的 `run_all_jobs` 默认 true；设为 false 会跳过整个作业。两个入口都支持 `reuse_system_run_id` 或 `reuse_usb_run_id`，二选一。复用必须是成功且来源合法的运行，后续阶段还会检查其 source lock 的驱动类型和补丁哈希，禁止 Stock/v23 串用或复用已变化的补丁。
 
-**特性**:
-- **不应用** W103D v23 补丁（使用 `kernel-patches-stock.json`）
-- 内核版本：动态从 ophub 获取（当前 6.18.y）
-- 与 v23 workflow **共享缓存**（当 kernel_sha/config/toolchain 相同时）
-- 适用于需要原版驱动行为的场景
+父流程总预算为 350 分钟，作业上限 360 分钟。它是所有阶段共享的总预算，不是每阶段均可额外使用 350 分钟。
 
-**触发**: 手动触发，选择 `run_all_jobs=true`
+## 缓存
 
-## 缓存机制
+缓存仅允许完整精确命中；不再使用 `w103d-kernel-` 前缀恢复其他构建的产物。
 
-两个 workflow 共享内核编译产物缓存：
+`kernel_cache.py` 的键包含：
 
-**Cache Key 构成**:
+- 固定的 Ophub 构建源码、内核源码、内核配置仓库/路径/内容哈希。
+- 所选补丁配置、实际补丁哈希，以及工具链和容器摘要。
+- 编译工作流和参与产物生成、验证的本仓库脚本内容。
+
+缓存含 DEB、`kernel-packages.json`、`sources.lock.json`、工具链版本和完整运行时 tarball。命中后仍校验当前 source lock、DEB 和运行时 archive 的哈希及内部校验清单。残缺缓存必须失败，不能宣称构建成功。新键使用 `w103d-kernel-v2-`，旧的不完整缓存自然失效。
+
+## 产物与在线内核源隔离
+
+IMG/ZIP 继续采用原版本化文件名，以保持所有交付验证器的接口一致。两版通过 source lock、独立运行 ID、Release 标签和标题区分。
+
+- v23 内核源：Release `kernel_stable_v23`，系统 `KERNEL_TAGS=stable_v23`。
+- Stock 内核源：Release `kernel_stable_stock`，系统 `KERNEL_TAGS=stable_stock`。
+- 两个内核源发布 runtime tar 包，镜像的 `DOWNLOAD_TYPE` 设置并回读验证为 `tar`，避免默认 deb 模式查找未发布的 deb 包。
+- 成品标签前缀分别为 `w103d-usb-v23-` 和 `w103d-usb-stock-`，包含父运行及 attempt 标识。
+- 成品发布只在新资产回读校验后清理同类型旧版本；不会清理另一类型、旧的不带类型标签、内核源或参考包。
+
+这样同一内核版本的不同驱动不会互相覆盖在线更新源。此隔离逻辑已经与当前锁定 Ophub 源码接口核对；完整重建和设备上的在线升级仍须实际执行验收。
+
+## 本地编排回归检查
+
+Python 3.11+，测试环境安装 PyYAML；生产构建辅助脚本仍只依赖标准库及工作流安装的系统工具。
+
+```bash
+python3 -m venv /tmp/w103d-check
+/tmp/w103d-check/bin/pip install PyYAML
+/tmp/w103d-check/bin/python -m unittest discover -s tests -v
 ```
-w103d-kernel-{kernel_sha}-{hashFiles(config, patch_config, patches)}-{toolchain_sha256}-{container_digest}
-```
 
-**特点**:
-- 当 `patch_config` 不同时（v23 vs stock），生成不同的 cache key
-- 当 kernel/config/toolchain 相同但补丁不同时，各自独立缓存
-- 使用 `restore-keys: w103d-kernel-` 前缀匹配最近缓存
-- GitHub Actions cache 限制 10 GB，实际单份内核产物约 300-500 MB
-
-**缓存命中**:
-- ✓ 完全命中：跳过 76 分钟内核编译
-- ✓ 部分命中：从最近构建恢复部分产物
-- ✗ 未命中：完整编译（首次构建或 config 变更后）
-
-## 内核版本选择
-
-两个 workflow 都动态从 ophub 的 `model_database.conf` 获取 W103D 支持的内核系列。
-
-**当前配置** (2026-10-15):
-- W103D 对应内核系列: `stable/6.18.y`
-- 自动跟踪 ophub/linux-6.18.y 的 main 分支最新提交
-
-如果 ophub 未来更新 W103D 到 6.6.y 或其他系列，两个 workflow 都会自动跟随。
-
-## Wi-Fi 固件
-
-MT7663 固件文件已提交到 `firmware/mediatek/`:
-- `mt7663_n9_v3.bin` (431 KB)
-- `mt7663pr2h.bin` (272 KB)
-
-USB 镜像组装时直接从仓库读取，无需解包参考镜像（但参考镜像仍保留用于容器结构）。
-
-## 构建流程
-
-两个 workflow 都按相同顺序调用子 workflow：
-
-1. **Compile kernel** (`compile-kernel.yml`)
-   - 解析并锁定内核源码 SHA
-   - 检查并应用补丁（v23 或 stock）
-   - 缓存检查：命中则跳过编译
-   - 编译内核并打包 deb
-   - 保存缓存
-
-2. **Build rootfs** (`build-system.yml`)
-   - 构建 Armbian 基础系统
-   - 安装内核 deb 包
-
-3. **Assemble USB image** (`build-usb-burn-image.yml`)
-   - 安装 Wi-Fi 固件
-   - 组装 USB 烧录镜像
-
-4. **Create delivery package** (`deliver-zipped-image.yml`)
-   - 打包最终可交付的 zip 文件
-
-## 区别总结
-
-| 特性 | v23 Workflow | Stock Workflow |
-|------|--------------|----------------|
-| 补丁配置 | `kernel-patches.json` | `kernel-patches-stock.json` |
-| Wi-Fi 驱动 | v23 (reason=4 修复) | 2021 原版 |
-| 内核版本 | 6.18.y (动态) | 6.18.y (动态) |
-| 缓存共享 | 是（条件命中） | 是（条件命中） |
-| 适用场景 | 日常使用（推荐） | 兼容性测试 |
-
-## 开发注意事项
-
-- 修改内核补丁时，更新 `config/kernel-patches.json` 或 `config/kernel-patches-stock.json`
-- 修改内核配置时，更新 `config/kernel.config`
-- 新增补丁文件放在 `patches/w103d/` 目录
-- Cache key 会自动包含以上文件的 hash，变更后会触发重新编译
+审计证据、实际失败运行和修复边界见 `docs/workflow-audit-2026-10-16.md`。这些测试不编译内核、不执行真实镜像挂载、不触发 Actions 或发布 Release。

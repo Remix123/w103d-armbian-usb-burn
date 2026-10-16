@@ -4,8 +4,8 @@
 Runs after orchestrate_build.py. Downloads the exact ZIP artifact recorded in the
 pipeline state, re-verifies it (ZIP SHA-256, internal SHA256SUMS, IMG SHA-256),
 creates a release, verifies the uploaded asset digests, and only then deletes
-older delivery releases (tag prefix ``w103d-usb-``) together with their tags.
-The kernel feed (``kernel_stable``) and reference input releases are never touched.
+older delivery releases of the same driver variant together with their tags.
+The kernel feeds (``kernel_stable_v23`` / ``kernel_stable_stock``) and reference input releases are never touched.
 """
 from __future__ import annotations
 
@@ -39,11 +39,14 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def release_tag(image_name: str, head_sha: str) -> str:
+def release_tag(image_name: str, head_sha: str, driver: str = "v23", build_id: str | None = None) -> str:
     match = re.fullmatch(r"W103D_Armbian_(\d+\.\d+\.\d+)_(\d+\.\d+\.\d+)_USB_Burning_Tool\.img", image_name)
     if not match:
         raise SystemExit(f"unexpected image basename: {image_name}")
-    return f"{TAG_PREFIX}{match.group(1)}-{match.group(2)}-{head_sha[:7]}"
+    if driver not in ("v23", "stock"):
+        raise ValueError(f"unknown driver variant: {driver}")
+    suffix = f"-r{build_id}" if build_id else ""
+    return f"{TAG_PREFIX}{driver}-{match.group(1)}-{match.group(2)}-{head_sha[:7]}{suffix}"
 
 
 def read_member_json(archive: Path, basename: str) -> dict:
@@ -84,7 +87,9 @@ def release_notes(state: dict, result: dict, archive: Path, repo: str) -> str:
         f"| Workflow source | `{state['ref']}` @ `{state['head_sha']}` |",
         f"| Pipeline run | https://github.com/{repo}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '?')} |",
         "",
-        "Only the newest build is kept as a release; older ones are deleted automatically.",
+        f"Driver variant: `{state['driver_variant']}`. Both variants use the locked 2021 N9 firmware.",
+        "This image has been verified offline; this workflow does not prove hardware flashing or boot.",
+        "Only older releases of the same driver variant are pruned after upload verification.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -122,15 +127,19 @@ def main() -> int:
     if sidecar.read_text().split() != [result["zip_sha256"], result["zip_name"]]:
         raise SystemExit("SHA-256 sidecar does not name the verified ZIP digest and basename")
 
-    tag = release_tag(result["image_name"], state["head_sha"])
+    from driver_variant import validate_driver_lock
+    driver = validate_driver_lock(read_member_json(archive, "sources.lock.json"), state.get("patch_config"))
+    if state.get("driver_variant") != driver:
+        raise SystemExit("ZIP driver identity differs from the selected pipeline")
+    build_id = os.environ['GITHUB_RUN_ID'] + "-a" + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+    tag = release_tag(result["image_name"], state["head_sha"], driver, build_id)
     notes = work / "notes.md"
     notes.write_text(release_notes(state, result, archive, repo))
-    title = result["zip_name"].removesuffix(".zip")
+    title = result["zip_name"].removesuffix(".zip") + f" ({driver})"
 
     existing = json.loads(gh("api", f"repos/{repo}/releases?per_page=100"))
     if any(r["tag_name"] == tag for r in existing):
-        # Same source commit and versions rebuilt: replace that release in place.
-        gh("release", "delete", tag, "--repo", repo, "--yes", "--cleanup-tag")
+        raise SystemExit(f"release {tag} already exists; preserve it and rerun with a new run attempt")
     gh("release", "create", tag, str(archive), str(sidecar), "--repo", repo, "--target", state["head_sha"],
        "--title", title, "--notes-file", str(notes), "--latest")
 
@@ -153,7 +162,7 @@ def main() -> int:
     removed = []
     for release in json.loads(gh("api", f"repos/{repo}/releases?per_page=100")):
         old = release["tag_name"]
-        if old == tag or old in PROTECTED_TAGS or not old.startswith(TAG_PREFIX):
+        if old == tag or old in PROTECTED_TAGS or not old.startswith(f"{TAG_PREFIX}{driver}-"):
             continue
         gh("release", "delete", old, "--repo", repo, "--yes", "--cleanup-tag")
         removed.append(old)

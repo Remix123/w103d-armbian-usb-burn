@@ -75,7 +75,11 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
-    locks = list(args.artifact_dir.rglob("sources.lock.json"))
+    return prepare_input(args.artifact_dir, args.output_dir, args.run_id)
+
+
+def prepare_input(artifact_dir: Path, output_dir: Path, run_id: str) -> int:
+    locks = list(artifact_dir.rglob("sources.lock.json"))
     if not locks:
         raise SystemExit("downloaded kernel artifact has no sources.lock.json")
     lock_hashes = {sha256(path) for path in locks}
@@ -86,7 +90,7 @@ def main() -> int:
         raise SystemExit("kernel artifact has multiple primary outputs/sources.lock.json files")
     lock_path = output_locks[0] if output_locks else locks[0]
     lock = json.loads(lock_path.read_text())
-    manifests = list(args.artifact_dir.rglob("kernel-packages.json"))
+    manifests = list(artifact_dir.rglob("kernel-packages.json"))
     if len(manifests) != 1:
         raise SystemExit(f"expected exactly one kernel-packages.json in downloaded artifact, found {len(manifests)}")
     package_manifest = json.loads(manifests[0].read_text())
@@ -96,30 +100,39 @@ def main() -> int:
     version = lock.get("kernel", {}).get("version", "")
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise SystemExit(f"invalid kernel version in source lock: {version!r}")
-    archives = [p for p in args.artifact_dir.rglob("*.tar.gz") if p.name == f"{version}.tar.gz"]
+    archives = [p for p in artifact_dir.rglob("*.tar.gz") if p.name == f"{version}.tar.gz"]
     if len(archives) != 1:
         raise SystemExit(f"expected exactly one {version}.tar.gz in downloaded artifact, found {len(archives)}")
     archive = archives[0]
+    if release != version + "-ophub":
+        raise SystemExit("kernel manifest and source lock versions disagree")
+    runtime = package_manifest.get("runtime_archive")
+    if runtime and runtime != {"file": archive.name, "size": archive.stat().st_size, "sha256": sha256(archive)}:
+        raise SystemExit("runtime archive differs from its build manifest")
+    for package in package_manifest.get("packages", []):
+        candidates = [p for p in artifact_dir.rglob(package["file"]) if p.is_file()]
+        if len(candidates) != 1 or candidates[0].stat().st_size != package["size"] or sha256(candidates[0]) != package["sha256"]:
+            raise SystemExit(f"kernel DEB differs from manifest: {package['file']}")
     inner = verify_inner_checksums(archive, version)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    staged_archive = args.output_dir / f"{version}.tar.gz"
-    staged_lock = args.output_dir / "sources.lock.json"
-    staged_packages = args.output_dir / "kernel-packages.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    staged_archive = output_dir / f"{version}.tar.gz"
+    staged_lock = output_dir / "sources.lock.json"
+    staged_packages = output_dir / "kernel-packages.json"
     shutil.copyfile(archive, staged_archive)
     shutil.copyfile(lock_path, staged_lock)
     shutil.copyfile(manifests[0], staged_packages)
     manifest = {
-        "kernel_run_id": str(args.run_id),
+        "kernel_run_id": str(run_id),
         "kernel_version": version,
         "kernel_release": release,
-        "archive_artifact_path": archive.relative_to(args.artifact_dir).as_posix(),
+        "archive_artifact_path": archive.relative_to(artifact_dir).as_posix(),
         "archive_sha256": sha256(staged_archive),
         "sources_lock_sha256": sha256(staged_lock),
         "kernel_packages_manifest_sha256": sha256(staged_packages),
         "inner_sha256_members": inner,
         "ophub_source_lock": lock,
     }
-    (args.output_dir / "kernel-input-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (output_dir / "kernel-input-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     output = __import__("os").environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a") as stream:

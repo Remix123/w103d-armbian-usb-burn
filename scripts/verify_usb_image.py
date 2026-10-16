@@ -233,6 +233,9 @@ def main() -> int:
         try:
             os_release = (mountpoint / "etc/os-release").read_text(errors="replace")
             ophub_release = (mountpoint / "etc/ophub-release").read_text(errors="replace")
+            from driver_variant import configure_tar_feed
+            if configure_tar_feed(ophub_release, sources_lock) != ophub_release:
+                raise SystemExit("rootfs kernel feed expects tar assets but DOWNLOAD_TYPE is not tar")
             armbian_release = parse_kv(mountpoint / "etc/armbian-release")
             if armbian_release.get("VERSION") != armbian_version:
                 raise SystemExit("packed rootfs /etc/armbian-release version differs from output basename")
@@ -266,8 +269,8 @@ def main() -> int:
             if [{k: r[k] for k in ("sha256", "version")} for r in assembly.get("wifi_firmware", [])] != \
                     [{k: r[k] for k in ("sha256", "version")} for r in wifi_checked]:
                 raise SystemExit("assembly report Wi-Fi firmware record differs from the packed rootfs")
-            if not sources_lock.get("kernel_patches") or assembly.get("kernel_patches") != sources_lock["kernel_patches"]:
-                raise SystemExit("kernel patch provenance is missing or differs between source lock and assembly")
+            from driver_variant import validate_patch_provenance
+            validate_patch_provenance(sources_lock, assembly)
             module_root = mountpoint / "lib/modules" / release
             if not module_root.is_dir():
                 module_root = mountpoint / "usr/lib/modules" / release

@@ -10,6 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 from urllib.parse import quote
+from driver_variant import selected_variant
 from workflow_run_guard import gh_workflow_lookup, validate_run_workflow
 
 
@@ -31,13 +32,17 @@ def numeric_run_id(value: str | None, label: str) -> str | None:
     return value
 
 
+def pipeline_matches(title: str, pipeline_id: str) -> bool:
+    return re.search(r"(?<![A-Za-z0-9-])" + re.escape(pipeline_id) + r"(?![A-Za-z0-9-])", title) is not None
+
+
 def select_correlated_run(runs: list[dict], *, pipeline_id: str, ref: str, head_sha: str, workflow_path: str) -> dict:
     matches = [run for run in runs if
         run.get("event") == "workflow_dispatch" and
         run.get("head_branch") == ref and
         run.get("head_sha") == head_sha and
         run.get("path") == workflow_path and
-        pipeline_id in run.get("display_title", "")]
+        pipeline_matches(run.get("display_title", ""), pipeline_id)]
     if len(matches) != 1:
         raise ValueError(f"expected one uniquely correlated {workflow_path} run; found {[(r.get('id'),r.get('display_title')) for r in matches]}")
     return matches[0]
@@ -119,7 +124,7 @@ def wait_for_child(stage: str, input_args: list[str], state: dict, stage_timeout
     while time.monotonic() < deadline:
         fresh = json.loads(gh("api", f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{child['run_id']}"))
         validate_run_workflow(fresh, os.environ["GITHUB_REPOSITORY"], gh_workflow_lookup(os.environ["GITHUB_REPOSITORY"]), require_success=False)
-        if fresh.get("path") != path or fresh.get("head_branch") != ref or fresh.get("head_sha") != head_sha or pipeline_id not in fresh.get("display_title", ""):
+        if fresh.get("path") != path or fresh.get("head_branch") != ref or fresh.get("head_sha") != head_sha or not pipeline_matches(fresh.get("display_title", ""), pipeline_id):
             raise ValueError(f"child run provenance changed after dispatch: {fresh}")
         status = fresh.get("status")
         if status != last_status:
@@ -140,6 +145,8 @@ def main() -> None:
     GLOBAL_DEADLINE = time.monotonic() + 350 * 60
     repo = os.environ["GITHUB_REPOSITORY"]
     head_sha = os.environ["GITHUB_SHA"]
+    patch_config = os.environ.get("PATCH_CONFIG", "config/kernel-patches.json")
+    driver = selected_variant(patch_config)
     pipeline_id = f"pipeline-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
     # Child workflows are dispatched on the same branch/tag that started this run and are
     # correlated by head SHA + pipeline token; no per-run tag is pushed.
@@ -148,7 +155,8 @@ def main() -> None:
     reuse_usb = numeric_run_id(os.environ.get("REUSE_USB_RUN_ID"), "reuse_usb_run_id")
     if reuse_system and reuse_usb:
         raise ValueError("provide at most one reuse run ID")
-    state = {"pipeline_id": pipeline_id, "ref": ref, "head_sha": head_sha, "children": [], "active_child_run_id": None}
+    state = {"pipeline_id": pipeline_id, "ref": ref, "head_sha": head_sha, "children": [], "active_child_run_id": None,
+             "driver_variant": driver, "patch_config": patch_config}
     save_state(state)
     summary(f"## W103D source build pipeline `{pipeline_id}`\n\nSource: `{ref}` at `{head_sha}`. Each stage is a separate workflow run on this ref, correlated by head SHA, workflow path and pipeline token; the pipeline stops if `{ref}` moves. Any failed stage stops delivery.")
 
@@ -163,10 +171,10 @@ def main() -> None:
             system_run = reuse_system
         else:
             wait_for_child("preflight", [], state, 30 * 60)
-            kernel_run = wait_for_child("compile", [["run_kernel_build", "true"]], state, 330 * 60)
-            system_run = wait_for_child("system", [["kernel_run_id", kernel_run]], state, 170 * 60)
-        usb_run = wait_for_child("usb", [["system_run_id", system_run]], state, 170 * 60)
-    zip_run = wait_for_child("zip", [["usb_run_id", usb_run]], state, 170 * 60)
+            kernel_run = wait_for_child("compile", [["run_kernel_build", "true"], ["patch_config", patch_config]], state, 330 * 60)
+            system_run = wait_for_child("system", [["kernel_run_id", kernel_run], ["patch_config", patch_config]], state, 170 * 60)
+        usb_run = wait_for_child("usb", [["system_run_id", system_run], ["patch_config", patch_config]], state, 170 * 60)
+    zip_run = wait_for_child("zip", [["usb_run_id", usb_run], ["patch_config", patch_config]], state, 170 * 60)
     zip_run_info = checked_run(zip_run, WORKFLOWS["zip"][1])
     artifacts = json.loads(gh("api", f"repos/{repo}/actions/runs/{zip_run}/artifacts?per_page=100"))["artifacts"]
     zip_artifacts = [a for a in artifacts if a.get("name", "").endswith("_USB_Burning_Tool.zip") and not a.get("expired")]

@@ -61,7 +61,16 @@ jobs:
           git init -q "$src"
           git -C "$src" remote add origin "https://github.com/ophub/linux-${KERNEL_SERIES}.git"
           git -C "$src" fetch -q --depth=1 --filter=blob:none origin "$KERNEL_SHA"
-          paths=$(python3 -c "import json,re; c=json.load(open('${PATCH_CONFIG}')); print(' '.join(sorted({f for p in c['patches'] for f in re.findall(r'^diff --git a/(\S+) b/', open(p['path']).read(), re.M)})))" || echo "")
+          paths=$(PYTHONPATH=scripts python3 - "$PATCH_CONFIG" <<'PYCODE'
+          import sys
+          from pathlib import Path
+          from driver_variant import selected_variant
+          from kernel_patch import load_patches
+          selected_variant(sys.argv[1])
+          patches=load_patches(Path(sys.argv[1]))
+          print(' '.join(sorted({f for p in patches for f in p['files']})) or 'Makefile')
+          PYCODE
+          )
           if [ -n "$paths" ]; then
             git -C "$src" sparse-checkout set --no-cone $paths
           fi
@@ -89,6 +98,9 @@ jobs:
         with:
           name: sources-lock-${{ github.run_id }}
           path: ${{ runner.temp }}
+      - name: Derive cache identity from the complete source lock and build code
+        id: cache-key
+        run: python3 scripts/kernel_cache.py key --lock "$RUNNER_TEMP/sources.lock.json"
       - name: Restore kernel compilation cache
         id: kernel-cache
         uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57
@@ -99,15 +111,14 @@ jobs:
             outputs/sources.lock.json
             outputs/toolchain-version.txt
             outputs/kernel-tarball
-          key: w103d-kernel-${{ needs.resolve.outputs.kernel_sha }}-${{ hashFiles('config/kernel.config', inputs.patch_config, 'patches/w103d/**') }}-${{ needs.resolve.outputs.toolchain_sha256 }}-${{ needs.resolve.outputs.container_digest }}
-          restore-keys: |
-            w103d-kernel-
+          key: ${{ steps.cache-key.outputs.cache_key }}
 
       - name: Use cached kernel if available
         if: steps.kernel-cache.outputs.cache-hit == 'true'
         run: |
           set -euo pipefail
-          echo "✓ Kernel cache hit, skipping compilation"
+          python3 scripts/kernel_cache.py verify --lock "$RUNNER_TEMP/sources.lock.json"
+          echo "✓ Complete kernel cache validated, skipping compilation"
           ls -lh outputs/kernel-debs/
           echo "Kernel packages:"
           cat outputs/kernel-packages.json
@@ -194,6 +205,7 @@ jobs:
       - name: Compile kernel packages from the locked source
         if: steps.kernel-cache.outputs.cache-hit != 'true'
         env:
+          PATCH_CONFIG: ${{ inputs.patch_config }}
           KERNEL_VERSION: ${{ needs.resolve.outputs.kernel_version }}
           CONTAINER_DIGEST: ${{ needs.resolve.outputs.container_digest }}
         run: |
@@ -215,7 +227,7 @@ jobs:
           # recompile must have built the patched tree (no reset/pull happened).
           cd "$GITHUB_WORKSPACE"
           python3 scripts/kernel_patch.py verify-applied \
-            --src "upstream/ophub/$src" --lock "$RUNNER_TEMP/sources.lock.json"
+            --src "upstream/ophub/$src" --lock "$RUNNER_TEMP/sources.lock.json" --config "$PATCH_CONFIG"
       - name: Capture build diagnostics and any partial output
         if: always()
         env:
@@ -233,7 +245,9 @@ jobs:
             test -d upstream/ophub/compile-kernel/output && find upstream/ophub/compile-kernel/output -maxdepth 3 -type d -printf '%p/\n' | sort
           } > diagnostics/build-state.txt 2>&1
           cp "$RUNNER_TEMP/sources.lock.json" diagnostics/sources-lock-fallback.json 2>/dev/null || true
-          cp outputs-toolchain-version.txt diagnostics/ 2>/dev/null || true
+          mkdir -p outputs
+          cp "$RUNNER_TEMP/sources.lock.json" outputs/sources.lock.json
+          cp outputs/toolchain-version.txt diagnostics/ 2>/dev/null || true
           docker ps -a > diagnostics/docker-ps.txt 2>&1 || true
           docker logs armbian-ophub > diagnostics/container.log 2>&1 || true
       - name: Verify exact kernel packages and preserve build provenance
@@ -265,7 +279,8 @@ jobs:
           python3 scripts/create_kernel_manifest.py \
             --deb-dir outputs/kernel-debs \
             --version "$KERNEL_VERSION" \
-            --out outputs/kernel-packages.json
+            --out outputs/kernel-packages.json \
+            --runtime-archive "$runtime_archive"
           cp "$RUNNER_TEMP/sources.lock.json" outputs/sources.lock.json
           # Copy tarball to outputs for caching
           mkdir -p outputs/kernel-tarball
@@ -281,7 +296,7 @@ jobs:
             outputs/sources.lock.json
             outputs/toolchain-version.txt
             outputs/kernel-tarball
-          key: w103d-kernel-${{ needs.resolve.outputs.kernel_sha }}-${{ hashFiles('config/kernel.config', inputs.patch_config, 'patches/w103d/**') }}-${{ needs.resolve.outputs.toolchain_sha256 }}-${{ needs.resolve.outputs.container_digest }}
+          key: ${{ steps.cache-key.outputs.cache_key }}
 
       - name: Upload kernel build results and diagnostics
         if: always()

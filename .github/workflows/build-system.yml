@@ -4,6 +4,11 @@ run-name: Rebuild W103D Trixie system (${{ inputs.pipeline_id || 'manual' }})
 on:
   workflow_dispatch:
     inputs:
+      patch_config:
+        description: "Expected driver configuration; blank permits either checked variant for manual runs"
+        required: false
+        type: string
+        default: ""
       kernel_run_id:
         description: "Successful compile-kernel run containing the verified kernel artifact"
         required: true
@@ -34,6 +39,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           KERNEL_RUN_ID: ${{ inputs.kernel_run_id }}
+          EXPECTED_PATCH_CONFIG: ${{ inputs.patch_config }}
         run: |
           set -euo pipefail
           run_id="$KERNEL_RUN_ID"
@@ -62,6 +68,15 @@ jobs:
             --artifact-dir "$RUNNER_TEMP/kernel-artifact" \
             --output-dir "$RUNNER_TEMP/kernel-input" \
             --run-id "$run_id"
+          python3 - <<'PYCODE'
+          import json, os, sys
+          sys.path.insert(0, 'scripts')
+          from driver_variant import validate_driver_lock
+          lock=json.load(open(os.environ['RUNNER_TEMP']+'/kernel-input/sources.lock.json'))
+          variant=validate_driver_lock(lock, os.environ.get('EXPECTED_PATCH_CONFIG') or None)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+              out.write('kernel_usage=stable_'+variant+'\n')
+          PYCODE
           cat "$RUNNER_TEMP/kernel-input/kernel-input-manifest.json"
           version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel_version"])' "$RUNNER_TEMP/kernel-input/kernel-input-manifest.json")
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -70,22 +85,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.kernel.outputs.version }}
+          KERNEL_USAGE: ${{ steps.kernel.outputs.kernel_usage }}
           KERNEL_RUN_ID: ${{ inputs.kernel_run_id }}
         run: |
           set -euo pipefail
-          gh release view kernel_stable --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create kernel_stable --repo "$GITHUB_REPOSITORY" --title "W103D Ophub kernel feed" --notes "Validated kernel archives built from the source lock attached to each system build."
+          gh release view "kernel_$KERNEL_USAGE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "kernel_$KERNEL_USAGE" --repo "$GITHUB_REPOSITORY" --title "W103D Ophub kernel feed" --notes "Validated kernel archives built from the source lock attached to each system build."
           mkdir -p "$RUNNER_TEMP/release-assets"
           cp "$RUNNER_TEMP/kernel-input/${VERSION}.tar.gz" "$RUNNER_TEMP/release-assets/${VERSION}.tar.gz"
           cp "$RUNNER_TEMP/kernel-input/sources.lock.json" "$RUNNER_TEMP/release-assets/sources.lock-${KERNEL_RUN_ID}.json"
           cp "$RUNNER_TEMP/kernel-input/kernel-input-manifest.json" "$RUNNER_TEMP/release-assets/kernel-input-manifest-${KERNEL_RUN_ID}.json"
-          gh release upload kernel_stable \
+          gh release upload "kernel_$KERNEL_USAGE" \
             "$RUNNER_TEMP/release-assets/${VERSION}.tar.gz" \
             "$RUNNER_TEMP/release-assets/sources.lock-${KERNEL_RUN_ID}.json" \
             "$RUNNER_TEMP/release-assets/kernel-input-manifest-${KERNEL_RUN_ID}.json" \
             --repo "$GITHUB_REPOSITORY" --clobber
           mkdir -p "$RUNNER_TEMP/release-check"
-          gh release download kernel_stable --repo "$GITHUB_REPOSITORY" --pattern "${VERSION}.tar.gz" --dir "$RUNNER_TEMP/release-check"
+          gh release download "kernel_$KERNEL_USAGE" --repo "$GITHUB_REPOSITORY" --pattern "${VERSION}.tar.gz" --dir "$RUNNER_TEMP/release-check"
           echo "$(sha256sum "$RUNNER_TEMP/kernel-input/${VERSION}.tar.gz" | cut -d' ' -f1)  $RUNNER_TEMP/release-check/${VERSION}.tar.gz" | sha256sum --check
 
       - name: Resolve latest generic Trixie arm64 server image from Ophub releases
@@ -145,7 +161,7 @@ jobs:
           armbian_kernel: ${{ steps.kernel.outputs.version }}
           auto_kernel: "false"
           kernel_repo: ${{ github.repository }}
-          kernel_usage: stable
+          kernel_usage: ${{ steps.kernel.outputs.kernel_usage }}
           armbian_fstype: ext4
           builder_name: W103D-GitHub-Actions
 

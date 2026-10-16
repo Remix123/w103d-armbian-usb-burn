@@ -9,6 +9,7 @@ import re
 import subprocess
 from urllib.parse import quote
 from pathlib import Path
+from orchestrate_build import pipeline_matches
 
 
 def gh(*args: str) -> str:
@@ -35,13 +36,13 @@ def main() -> None:
         endpoint = f"repos/{repo}/actions/workflows/{workflow}/runs?event=workflow_dispatch&branch={quote(ref, safe='')}&per_page=100"
         result = json.loads(gh("api", endpoint))
         for run in result.get("workflow_runs", []):
-            if run.get("head_sha") == head_sha and run.get("head_branch") == ref and run.get("path") == path and pipeline_id in run.get("display_title", ""):
+            if run.get("head_sha") == head_sha and run.get("head_branch") == ref and run.get("path") == path and pipeline_matches(run.get("display_title", ""), pipeline_id):
                 known[str(run["id"])] = path
     active = []
     failures = []
     for run_id, path in known.items():
         run = json.loads(gh("api", f"repos/{repo}/actions/runs/{run_id}"))
-        if run.get("path") != path or run.get("head_branch") != ref or run.get("head_sha") != head_sha or pipeline_id not in run.get("display_title", ""):
+        if run.get("path") != path or run.get("head_branch") != ref or run.get("head_sha") != head_sha or not pipeline_matches(run.get("display_title", ""), pipeline_id):
             print(f"skip run {run_id}: correlation no longer matches")
             continue
         if run.get("status") != "completed":

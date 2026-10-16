@@ -4,6 +4,11 @@ run-name: ZIP verified W103D image (${{ inputs.pipeline_id || 'manual' }})
 on:
   workflow_dispatch:
     inputs:
+      patch_config:
+        description: "Expected driver configuration; blank permits either checked variant for manual runs"
+        required: false
+        type: string
+        default: ""
       usb_run_id:
         description: "Successful build-usb-burn-image workflow run containing the raw IMG and verification reports"
         required: true
@@ -33,6 +38,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           USB_RUN_ID: ${{ inputs.usb_run_id }}
+          EXPECTED_PATCH_CONFIG: ${{ inputs.patch_config }}
         run: |
           set -euo pipefail
           [[ "$USB_RUN_ID" =~ ^[0-9]+$ ]]
@@ -71,6 +77,9 @@ jobs:
           python3 - <<'PY'
           import json, os, re
           from pathlib import Path
+          import sys
+          sys.path.insert(0, "scripts")
+          from driver_variant import validate_driver_lock
           root=Path('outputs/input')
           report=json.loads((root/'reports/verification-report.json').read_text())
           validation=(root/'reports/artifact-download-validation.txt').read_text()
@@ -94,6 +103,8 @@ jobs:
           provenance=root/'reports/provenance'
           required={'sources.lock.json','kernel-input-manifest.json','base-image.lock.json','system-image-verification.json','system-source-run.json'}
           missing=required-{p.name for p in provenance.iterdir() if p.is_file()}
+          lock=json.loads((provenance/'sources.lock.json').read_text())
+          validate_driver_lock(lock, os.environ.get("EXPECTED_PATCH_CONFIG") or None)
           if missing or not (root/'reports/reference.lock.json').is_file():
               raise SystemExit(f'missing source provenance files: {sorted(missing)}')
           Path(os.environ['RUNNER_TEMP']+'/expected-image.json').write_text(json.dumps({'name':image_name,'bytes':int(size.group(1)),'sha256':match.group(1),'artifact_id':artifact_id}))

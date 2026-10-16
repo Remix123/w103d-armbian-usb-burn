@@ -35,6 +35,7 @@ jobs:
         id: pipeline
         env:
           GH_TOKEN: ${{ github.token }}
+          PATCH_CONFIG: config/kernel-patches.json
           REUSE_SYSTEM_RUN_ID: ${{ inputs.reuse_system_run_id }}
           REUSE_USB_RUN_ID: ${{ inputs.reuse_usb_run_id }}
         run: python3 scripts/orchestrate_build.py
