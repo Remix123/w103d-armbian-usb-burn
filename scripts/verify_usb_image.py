@@ -317,6 +317,18 @@ def main() -> int:
             raw_initrd = root / "initrd.raw"
             raw_initrd.write_bytes(initrd_payload)
             subprocess.run(["unmkinitramfs", str(raw_initrd), str(initrd_dir)], check=True)
+            from initramfs_firmware import archive_layers, verify_tree
+            # Check every early/main copy, including firmware/updates/* and compression.
+            verify_tree(mountpoint, wifi_lock)
+            initrd_firmware = {layer.name: verify_tree(layer, wifi_lock, require_pair=layer.name == "main")
+                              for layer in archive_layers(initrd_dir)}
+            if (fat_readback / f"initrd.img-{release}").read_bytes() != initrd_payload:
+                raise SystemExit("versioned initrd differs from the active uInitrd payload")
+            if verify_legacy_image(fat_readback / f"uInitrd-{release}") != initrd_payload:
+                raise SystemExit("versioned uInitrd differs from the active uInitrd payload")
+            recorded = assembly.get("initramfs_firmware", {})
+            if recorded.get("payload_sha256") != hashlib.sha256(initrd_payload).hexdigest() or recorded.get("after") != initrd_firmware:
+                raise SystemExit("final initramfs firmware differs from the assembly report")
             initrd_module_paths = [p for p in initrd_dir.rglob("*") if p.is_file() and
                                    any(p.name.endswith(suffix) for suffix in (".ko", ".ko.xz", ".ko.zst", ".ko.gz"))]
             if not initrd_module_paths:
@@ -351,6 +363,8 @@ def main() -> int:
             "fat_regular_files_checked": len(boot_file_checks), "kernel_release": release,
             "kernel_modules_byte_identical": len(module_records), "initramfs_modules_byte_identical": initrd_modules,
             "wifi_firmware": wifi_checked,
+            "initramfs_firmware": initrd_firmware,
+            "initramfs_firmware_matches_rootfs": True,
             "kernel_patches": [{"path": p["path"], "sha256": p["sha256"]} for p in sources_lock["kernel_patches"]],
             "root_filesystem": {"label": "W103D_ROOT", "read_only_mount": True, "e2fsck": "passed"},
             "u_boot_scripts": "mkimage legacy header and path configuration checked",

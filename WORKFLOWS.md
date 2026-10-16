@@ -61,3 +61,11 @@ python3 -m venv /tmp/w103d-check
 ```
 
 审计证据、实际失败运行和修复边界见 `docs/workflow-audit-2026-10-16.md`。这些测试不编译内核、不执行真实镜像挂载、不触发 Actions 或发布 Release。
+
+## initramfs 与 rootfs 固件一致性
+
+两个入口的 USB 组装阶段共用 `initramfs_firmware.py`：先安装并核对 rootfs 的锁定 MT7663 固件，再解开启动用 initramfs 的 early/main CPIO 层。旧版、缺失、压缩或符号链接固件副本不一致时，用 rootfs 中已核对的文件修正并重建归档；early 层保持未压缩及原顺序，main 使用 gzip，因此要求目标内核启用 `CONFIG_RD_GZIP=y`。启动脚本、模块、权限、硬链接和符号链接由 GNU cpio 保留。
+
+整个过程不需要 ARM chroot，不执行内核包 postinst 或 bootloader 更新钩子。`initrd.img-<release>`、`uInitrd` 和 `uInitrd-<release>` 同步更新，原输入镜像不修改。组装报告记录重建前后固件哈希、重建原因和最终 initrd payload 哈希。
+
+最终 verifier 从实际 Amlogic 镜像回读 rootfs 和 FAT/uInitrd，重新解包 initramfs，检查所有固件副本与锁定哈希一致，并核对版本化 initrd/uInitrd、报告和实际 payload。`.github/workflows/check-initramfs-firmware.yml` 提供真实 Linux CPIO、早期归档、硬链接/权限保留及 U-Boot CRC 的小型回归检查，不会触发完整内核构建或发布镜像。

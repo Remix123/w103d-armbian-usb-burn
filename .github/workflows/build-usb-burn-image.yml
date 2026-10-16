@@ -152,7 +152,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes abootimg ca-certificates curl device-tree-compiler dosfstools e2fsprogs file gzip initramfs-tools-core kmod lz4 mtools parted python3 rsync u-boot-tools util-linux zstd
+          sudo apt-get install --yes abootimg ca-certificates cpio curl device-tree-compiler dosfstools e2fsprogs file gzip initramfs-tools-core kmod lz4 mtools parted python3 rsync u-boot-tools util-linux zstd
           git clone https://github.com/khadas/utils.git "$RUNNER_TEMP/khadas-utils"
           git -C "$RUNNER_TEMP/khadas-utils" checkout --detach a3604ed6d6863d1946d26d0ac8e765aef6f17430
           packer="$RUNNER_TEMP/khadas-utils/aml-flash-tool/tools/linux-x86/aml_image_v2_packer"

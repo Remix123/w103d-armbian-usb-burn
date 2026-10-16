@@ -1,0 +1,33 @@
+name: Check initramfs firmware consistency
+
+on:
+  push:
+    paths:
+      - '.github/workflows/check-initramfs-firmware.yml'
+      - '.github/workflows/build-usb-burn-image.yml'
+      - 'scripts/initramfs_firmware.py'
+      - 'scripts/assemble_usb_image.py'
+      - 'scripts/verify_usb_image.py'
+      - 'scripts/driver_variant.py'
+      - 'tests/**'
+      - 'config/wifi-firmware.lock.json'
+      - 'firmware/mediatek/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Install native archive and test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cpio gzip initramfs-tools-core python3-yaml u-boot-tools zstd
+          command -v unmkinitramfs cpio mkimage
+      - name: Exercise real CPIO repair and U-Boot readback plus pipeline regressions
+        run: |
+          /usr/bin/python3 -m unittest discover -s tests -v

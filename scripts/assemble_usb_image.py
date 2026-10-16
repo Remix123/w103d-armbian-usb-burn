@@ -182,6 +182,10 @@ def install_wifi_firmware(root: Path, lock: dict) -> list[dict]:
         records.append({"path": "/" + (Path(lock["install_dir"]) / entry["name"]).as_posix(),
                         "sha256": entry["sha256"], "version": entry["version"],
                         "replaced_sha256": previous})
+    from initramfs_firmware import replace_copies, verify_tree
+    # Also normalize any higher-priority updates/<release>/ firmware copies.
+    replace_copies(root, root, lock, install_pair=False)
+    verify_tree(root, lock)
     return records
 
 def gunzip_sparse(source: Path, target: Path) -> int:
@@ -343,7 +347,20 @@ def main() -> int:
         shutil.copy2(kernel_path, boot_src / "Image")
         (boot_src / "dtb-w103d/meson-g12a-w103d.dtb").write_bytes(dtb)
         (boot_src / "dtb/amlogic/meson-g12a-w103d.dtb").write_bytes(dtb)
-        initrd_payload = ensure_uinitrd(kernel_path.parent, initrd_path, boot_src / "uInitrd")
+        from initramfs_firmware import repair_initramfs
+        source_payload = a.work / "source-initrd.img"
+        source_payload.write_bytes(raw_initrd(initrd_path))
+        checked_initrd, initrd_firmware = repair_initramfs(
+            source_payload, root_mount, wifi_lock, a.work / "initramfs-firmware", kernel_config)
+        # Every active/versioned FAT copy must follow the checked payload.
+        staged_initrd = boot_src / f"initrd.img-{release}"
+        staged_initrd.unlink(missing_ok=True)
+        shutil.copyfile(checked_initrd, staged_initrd)
+        (boot_src / "uInitrd").unlink(missing_ok=True)
+        initrd_payload = ensure_uinitrd(boot_src, staged_initrd, boot_src / "uInitrd")
+        versioned_uinitrd = boot_src / f"uInitrd-{release}"
+        versioned_uinitrd.unlink(missing_ok=True)
+        shutil.copyfile(boot_src / "uInitrd", versioned_uinitrd)
         initrd_sha256 = hashlib.sha256(initrd_payload).hexdigest()
         if not a.ophub_boot_emmc.is_file():
             raise SystemExit("locked Ophub boot-emmc.cmd input is missing")
@@ -455,6 +472,7 @@ def main() -> int:
         "reference_component_sha256": {name: hash_file(reference / name) for name in VENDOR_COMPONENTS},
         "system_input_sha256": hash_file(a.system_image), "kernel_archive_sha256": hash_file(a.kernel_archive),
         "kernel_release": release, "wifi_firmware": wifi_firmware,
+        "initramfs_firmware": initrd_firmware,
         "kernel_patches": source_lock.get("kernel_patches", []), "layout": {"boot_bytes": boot_raw.stat().st_size, "root_bytes": root_raw.stat().st_size,
             "boot_label": "W103D_BOOT", "root_label": "W103D_ROOT", "root_uuid": "01b94932-6a4a-4c81-9a71-20bd55b675a8"},
         "armbian_version": armbian_version,
